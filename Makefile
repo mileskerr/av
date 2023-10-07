@@ -1,6 +1,8 @@
 CC := gcc
 CFLAGS := -Wall -lSDL2 -lSDL2_ttf -lm -lavformat -lavcodec -lswscale -lavutil -lz
 DEBUGFLAGS := -g -O0
+#-fsanitize=address
+#LDFLAGS := -static-libasan
 RELEASEFLAGS := -O3
 APP_NAME := av
 
@@ -13,7 +15,7 @@ OBJS := $(SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
 all: $(OBJS)
 	$(CC) $(DEBUGFLAGS) $(CFLAGS) $(OBJS) -o $(BUILD_DIR)/$(APP_NAME)
 
-$(BUILD_DIR)/%.o : %.c
+$(BUILD_DIR)/%.o : $(SRC_DIR)/%.c
 	mkdir -p $(BUILD_DIR)
 	$(CC) $(DEBUGFLAGS) $(CFLAGS) -c $< -o $@
 
