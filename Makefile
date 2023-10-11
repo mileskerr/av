@@ -1,5 +1,5 @@
 CC := gcc
-CFLAGS := -Wall -lSDL2 -lSDL2_ttf -lm -lavformat -lavcodec -lswscale -lavutil -lz
+CFLAGS := -Wall -lSDL2 -lSDL2_ttf -lm -lavformat -lavcodec -lswscale -lavutil -lswresample -lz
 DEBUGFLAGS := -g -O0
 #-fsanitize=address
 #LDFLAGS := -static-libasan
