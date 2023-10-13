@@ -8,6 +8,7 @@
 #include <libswscale/swscale.h>
 #include <libavutil/frame.h>
 #include <libavutil/mem.h>
+#include <libswresample/swresample.h>
 
 #include <unistd.h>
 #include <stdint.h>
@@ -17,3 +18,5 @@
 
 #define MIN(A, B) (A < B) ? (A) : (B)
 #define MAX(A, B) (A > B) ? (A) : (B)
+
+typedef struct SDL_semaphore SDL_semaphore;
