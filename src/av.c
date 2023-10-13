@@ -1,6 +1,6 @@
 #include "av.h"
-#include "movie.h"
-#include "drw.h"
+#include "playback.h"
+#include "draw.h"
 #include <SDL2/SDL_assert.h>
 #include <SDL2/SDL_atomic.h>
 #include <SDL2/SDL_audio.h>
@@ -10,14 +10,6 @@
 
 bool quit = false;
 
-#define ASSERT(condition) {\
-if ((condition)) { \
-    fprintf(stderr, "assertion (%s) failed at %s:%d\n", #condition, __FILE__, __LINE__); \
-    exit(1); \
-}}
-
-#define TO_CLOCKS(SECONDS) ((clock_t) (((float) SECONDS) * ((float) CLOCKS_PER_SEC)))
-const clock_t REFRESH_TIME = TO_CLOCKS(0.02);
 
 #define SDL_AUDIO_FMT AUDIO_S16SYS
 #define SDL_AUDIO_SAMPLES 1024

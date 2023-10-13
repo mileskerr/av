@@ -19,4 +19,10 @@
 #define MIN(A, B) (A < B) ? (A) : (B)
 #define MAX(A, B) (A > B) ? (A) : (B)
 
+#define ASSERT(condition) {\
+if ((condition)) { \
+    fprintf(stderr, "assertion (%s) failed at %s:%d\n", #condition, __FILE__, __LINE__); \
+    exit(1); \
+}}
+
 typedef struct SDL_semaphore SDL_semaphore;

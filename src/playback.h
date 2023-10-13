@@ -1,3 +1,4 @@
+#pragma once
 #include "av.h"
 #define PACKET_QUEUE_SIZE 16
 

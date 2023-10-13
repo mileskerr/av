@@ -1,11 +1,11 @@
-#include "movie.h"
+#include "playback.h"
+#include "util.h"
 #include <SDL2/SDL_mutex.h>
 #include <SDL2/SDL_thread.h>
 #include <libavcodec/packet.h>
 #include <libavutil/error.h>
 
 extern bool quit;
-
 
 static AVChannelLayout nb_ch_to_av_ch_layout(int n) {
     switch (n) {
