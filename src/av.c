@@ -137,7 +137,7 @@ int main(int argc, char * argv[]) {
 
     SDL_Renderer * renderer;
     SDL_Window * window;
-    init_sdl(&renderer, &window);
+    if (init_sdl(&renderer, &window)) return -1;
 
 
     TTF_Init();
@@ -177,7 +177,7 @@ int main(int argc, char * argv[]) {
         struct timespec frame_start, frame_finish;
         double elapsed;
         clock_gettime(CLOCK_MONOTONIC, &frame_start);
-        enum Action action;
+        enum Action action = 0;
 
         SDL_PumpEvents();
         while (SDL_PollEvent(&event)) {
@@ -187,6 +187,10 @@ int main(int argc, char * argv[]) {
         }
 
         if (action & QUIT) quit = true;
+
+        if (action & PLAY_PAUSE) {
+            play_pause(pb_ctx);
+        }
 
         if (ts >= next_frame_ts) {
             draw_background(renderer, &colors);
@@ -209,15 +213,18 @@ int main(int argc, char * argv[]) {
         );
         SDL_RenderPresent(renderer);
 
+
         do {
             clock_gettime(CLOCK_MONOTONIC, &frame_finish);
             elapsed = frame_finish.tv_sec - frame_start.tv_sec + (frame_finish.tv_nsec - frame_start.tv_nsec) / 1000000000.0;
         } while (elapsed < min_frame_time);
 
-        ts += elapsed/av_q2d(pb_ctx->time_base);
+        if (!pb_ctx->paused)
+            ts += elapsed/av_q2d(pb_ctx->time_base);
     }
 
     destroy_framebuffer(&framebuffer);
+    destroy_playback_ctx(pb_ctx);
 
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);

@@ -9,6 +9,8 @@
 
 extern bool quit;
 
+int threads_initialized = 0;
+
 
 /* data used to convert frames to a common format
  * sws_context is not used for scaling, only format conversion.
@@ -75,11 +77,63 @@ static int decode_frame(AVCodecContext * codec_ctx, AVPacket * pkt, AVFrame * fr
     return 0;
 }
 
+struct MessageQueue create_message_queue(void) {
+    return (struct MessageQueue) {
+        0, SDL_CreateMutex(),
+        NULL, NULL 
+    };
+}
 
+void msgq_send(struct MessageQueue * msgq, void * content) {
+    SDL_LockMutex(msgq->mutex);
+
+    struct Message * msg = malloc(sizeof(struct Message));
+
+    *msg = (struct Message) {
+        .content = content,
+        .next = NULL
+    };
+
+    if (msgq->last) {
+        msgq->last->next = msg;
+        msgq->last = msg;
+    } else {
+        msgq->first = msgq->last = msg;
+    }
+
+    msgq->count++;
+
+    SDL_UnlockMutex(msgq->mutex);    
+}
+
+/* get the first message in the queue and store it in content, if there
+ * is one. Otherwise, set content to NULL. caller is responsible for freeing
+ * content */
+void msgq_receive(struct MessageQueue * msgq, void ** content) {
+    SDL_LockMutex(msgq->mutex);
+
+    int ret;
+    if (msgq->count) {
+        struct Message * got_msg = msgq->first;
+        *content = got_msg->content;
+        if (msgq->last == msgq->first) {
+            msgq->last = msgq->first = NULL;
+        } else {
+            msgq->first = msgq->first->next;
+        }
+        free(got_msg);
+        msgq->count--;
+    } else {
+        *content = NULL;
+    }
+
+    SDL_UnlockMutex(msgq->mutex);
+}
 
 struct PacketQueue create_packet_queue(void) {
     return (struct PacketQueue) {
         .capacity = SDL_CreateSemaphore(0),
+        .mutex = SDL_CreateMutex()
     };
 }
 
@@ -91,8 +145,7 @@ void destroy_packet_queue(struct PacketQueue * pktq) {
     SDL_DestroySemaphore(pktq->capacity);
 }
 
-
-static void pktq_put(struct PacketQueue * pktq, AVPacket * pkt) {
+static void queue_pkt(struct PacketQueue * pktq, AVPacket * pkt) {
     int back = (pktq->front_idx + SDL_SemValue(pktq->capacity)) % PACKET_QUEUE_SIZE;
 
     SDL_LockMutex(pktq->mutex);
@@ -101,7 +154,7 @@ static void pktq_put(struct PacketQueue * pktq, AVPacket * pkt) {
     SDL_SemPost(pktq->capacity);
 }
 
-static AVPacket * pktq_get(struct PacketQueue * pktq) {
+static AVPacket * dequeue_pkt(struct PacketQueue * pktq) {
     SDL_SemWait(pktq->capacity);
 
     /* mutex is not needed because only one thread will ever be getting
@@ -113,9 +166,28 @@ static AVPacket * pktq_get(struct PacketQueue * pktq) {
     return ret;
 }
 
+static void pktq_drain(struct PacketQueue * src, struct PacketQueue * dst) {
+    SDL_LockMutex(src->mutex);
+    SDL_LockMutex(dst->mutex);
+
+    int dst_back = (dst->front_idx + SDL_SemValue(dst->capacity)) % PACKET_QUEUE_SIZE;
+    int src_front = src->front_idx;
+
+    for (int i = 0; i < SDL_SemValue(src->capacity); i++) {
+        int src_idx = (src_front + i) % PACKET_QUEUE_SIZE;
+        int dst_idx = (dst_back + i) % PACKET_QUEUE_SIZE;
+        dst->data[dst_idx] = src->data[src_idx];
+        SDL_SemPost(dst->capacity);
+        SDL_SemWait(src->capacity);
+    }
+
+    SDL_UnlockMutex(src->mutex);
+    SDL_UnlockMutex(dst->mutex);
+}
+
 void pktq_fill(struct PacketQueue * pktq) {
     for (int i = 0; i < PACKET_QUEUE_SIZE; i++) {
-        pktq_put(pktq, av_packet_alloc());
+        queue_pkt(pktq, av_packet_alloc());
     }
 }
 
@@ -143,8 +215,8 @@ void destroy_framebuffer(struct FrameBuffer * fb) {
     SDL_DestroyMutex(fb->mutex);
 }
 
-void framebuffer_swap(struct FrameBuffer * fb) {
-    SDL_LockMutex(fb->mutex);
+int framebuffer_swap(struct FrameBuffer * fb) {
+    if (SDL_TryLockMutex(fb->mutex)) return 1;
 
     if (fb->frame_needed); /* we haven't even started decoding this frame yet. lets not get ahead of ourselves */
     else {
@@ -163,6 +235,7 @@ void framebuffer_swap(struct FrameBuffer * fb) {
     }
 
     SDL_UnlockMutex(fb->mutex);
+    return 0;
 }
 
 void wait_for_frame_needed(struct FrameBuffer * fb) {
@@ -189,11 +262,17 @@ int demuxing_thread(void * data) {
     struct PacketQueue * decoded_pktq = info->decoded_pktq;
     struct PacketQueue * demuxed_vpktq = info->demuxed_vpktq;
     struct PacketQueue * demuxed_apktq = info->demuxed_apktq;
+    struct MessageQueue * msgq = info->msgq_in;
     int vstream_idx = info->vstream_idx;
     int astream_idx = info->astream_idx;
 
+    threads_initialized += 1;
+
+
     while (!quit) {
-        AVPacket * pkt = pktq_get(decoded_pktq);
+
+        
+        AVPacket * pkt = dequeue_pkt(decoded_pktq);
 
         av_packet_unref(pkt);
 
@@ -201,12 +280,11 @@ int demuxing_thread(void * data) {
         if ((ret = av_read_frame(format_ctx, pkt))) {
             /* the packet must be recycled into the queue if we aren't decoding it */
             fprintf(stderr, "%s", av_err2str(ret));
-            pktq_put(decoded_pktq, pkt);
+            queue_pkt(decoded_pktq, pkt);
         } else if (pkt->stream_index == vstream_idx)
-            pktq_put(demuxed_vpktq, pkt);
+            queue_pkt(demuxed_vpktq, pkt);
         else
-            pktq_put(decoded_pktq, pkt);
-
+            queue_pkt(decoded_pktq, pkt);
     }
     return 0;
 }
@@ -217,6 +295,8 @@ int audio_thread(void * data) {
     AVCodecContext * codec_ctx = info->codec_ctx;
     struct PacketQueue * demuxed_pktq = info->demuxed_pktq;
     struct PacketQueue * decoded_pktq = info->decoded_pktq;
+
+    threads_initialized += 1;
 
     uint8_t * audio_buf = NULL;
     size_t audio_buf_len = 0;
@@ -260,7 +340,7 @@ int audio_thread(void * data) {
         };
     }
     while (!quit) {
-        AVPacket * pkt = pktq_get(demuxed_pktq);
+        AVPacket * pkt = dequeue_pkt(demuxed_pktq);
 
         int ret;
         if ((ret = decode_frame(codec_ctx, pkt, frame))) {
@@ -297,11 +377,12 @@ int audio_thread(void * data) {
 int video_thread(void * data) {
     struct VideoInfo * info = data;
     AVCodecContext * codec_ctx = info->codec_ctx;
+    struct MessageQueue * msgq = info->msgq_in;
     struct PacketQueue * demuxed_pktq = info->demuxed_pktq;
     struct PacketQueue * decoded_pktq = info->decoded_pktq;
-    printf("info->demuxed_pktq: %ld\n", (long unsigned int) info->demuxed_pktq);
-    printf("demuxed_pktq: %ld\n", (long unsigned int) demuxed_pktq);
     struct FrameBuffer * fb = info->fb;
+
+    threads_initialized += 1;
 
     AVFrame * frame = av_frame_alloc();
 
@@ -309,10 +390,33 @@ int video_thread(void * data) {
         codec_ctx, AV_PIX_FMT_RGB24, get_texture_pitch(fb->frame)
     );
 
+    bool paused;
+    uint32_t * msg;
+
     while (!quit) {
+        msgq_receive(msgq, (void**)&msg);
+
+        if (!msg) goto nomsg;
+        switch (*msg) {
+            case PLAY:
+                paused = false;  
+                printf("playing\n");
+            case PAUSE: {
+                paused = true;
+                printf("pauseing\n");
+            }
+        }
+
+        free(msg);
+        if (paused) { 
+            usleep(50);
+            continue;
+        }
+
+        nomsg:
         wait_for_frame_needed(fb);
 
-        AVPacket * pkt = pktq_get(demuxed_pktq);
+        AVPacket * pkt = dequeue_pkt(demuxed_pktq);
 
         int ret;
         if ((ret = decode_frame(codec_ctx, pkt, frame)))
@@ -320,7 +424,7 @@ int video_thread(void * data) {
         else {
             convert_frame(&frame_conv, frame, fb->pixel_buf);
         }
-        pktq_put(decoded_pktq, pkt);
+        queue_pkt(decoded_pktq, pkt);
 
         fb->next_duration = pkt->duration;
 

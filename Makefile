@@ -1,10 +1,9 @@
 CC := gcc
-DEBUGFLAGS := -g -O0
+DEBUGFLAGS := -g -O0 
+#-fsanitize=address
 RELEASEFLAGS := -O3
 CFLAGS := -Wall $(DEBUGFLAGS)
 LDFLAGS := -lSDL2 -lSDL2_ttf -lm -lavformat -lavcodec -lswscale -lavutil -lswresample -lz
-#-fsanitize=address
-#LDFLAGS := -static-libasan
 APP_NAME := av
 
 SRC_DIR := src

@@ -22,13 +22,33 @@ struct PacketQueue {
 struct PacketQueue create_packet_queue(void);
 void destroy_packet_queue(struct PacketQueue * pktq);
 void pktq_fill(struct PacketQueue * pktq);
+struct MessageQueue create_message_queue(void);
+void msgq_receive(struct MessageQueue * msgq, void ** content);
+void msgq_send(struct MessageQueue * msgq, void * content);
 
+enum MsgCode {
+    PLAY = true,
+    PAUSE = false,
+};
+
+struct MessageQueue {
+    int count;
+    SDL_mutex * mutex;
+    struct Message * first;
+    struct Message * last;
+};
+
+struct Message {
+    void * content;
+    struct Message * next;
+};
 
 struct DemuxInfo {
     AVFormatContext * format_ctx;
     struct PacketQueue * demuxed_vpktq;
     struct PacketQueue * demuxed_apktq;
     struct PacketQueue * decoded_pktq;
+    struct MessageQueue * msgq_in;
     int vstream_idx;
     int astream_idx;
 };
@@ -42,10 +62,11 @@ struct AudioInfo {
 int audio_thread(void *);
 
 struct VideoInfo {
-  AVCodecContext * codec_ctx;
-  struct PacketQueue * demuxed_pktq;
-  struct PacketQueue * decoded_pktq;
-  struct FrameBuffer * fb;
+    AVCodecContext * codec_ctx;
+    struct PacketQueue * demuxed_pktq;
+    struct PacketQueue * decoded_pktq;
+    struct MessageQueue * msgq_in;
+    struct FrameBuffer * fb;
 };
 int video_thread(void *);
 

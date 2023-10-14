@@ -9,6 +9,7 @@ struct InternalData {
     AVCodecContext * vcodec_ctx, * acodec_ctx;
     int astream_idx, vstream_idx;
     struct PacketQueue demuxed_vpktq, demuxed_apktq, decoded_pktq;
+    struct MessageQueue msgq_in, msgq_out_demux, msgq_out_vdec, msgq_out_adec;
 };
 
 static AVCodecContext * open_codec_context(AVFormatContext * format_ctx, int stream_idx) {
@@ -101,6 +102,8 @@ void playback_to_framebuffer(struct PlaybackCtx * pb_ctx, struct FrameBuffer * f
     id->demuxed_apktq = create_packet_queue();
     id->demuxed_vpktq = create_packet_queue();
     id->decoded_pktq = create_packet_queue();
+    id->msgq_out_demux = create_message_queue();
+    id->msgq_out_vdec = create_message_queue();
 
     pktq_fill(&id->decoded_pktq);
 
@@ -112,6 +115,7 @@ void playback_to_framebuffer(struct PlaybackCtx * pb_ctx, struct FrameBuffer * f
             &id->demuxed_vpktq,
             &id->demuxed_apktq,
             &id->decoded_pktq,
+            &id->msgq_out_demux,
             id->vstream_idx,
             id->astream_idx
         }
@@ -122,10 +126,30 @@ void playback_to_framebuffer(struct PlaybackCtx * pb_ctx, struct FrameBuffer * f
             id->vcodec_ctx,
             &id->demuxed_vpktq,
             &id->decoded_pktq,
+            &id->msgq_out_vdec,
             fb,
         }
-    );  
-    usleep(50); /* dirty hack to make sure the stack allocated variables stick around long enough */
+    );
+    extern int threads_initialized;
+    while (threads_initialized < 2);
+}
+
+
+void play_pause(struct PlaybackCtx * pb_ctx) {
+    struct InternalData * id = pb_ctx->internal_data;
+
+    uint32_t * content = malloc(4);
+
+    if (pb_ctx->paused)
+        *content = PLAY;
+    else *content = PAUSE;
+
+        
+
+    msgq_send(&id->msgq_out_vdec, content);
+
+    pb_ctx->paused = !pb_ctx->paused;
+
 }
 
 void destroy_playback_ctx(struct PlaybackCtx * pb_ctx) {

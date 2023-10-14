@@ -4,7 +4,6 @@
 /* buffer for storing frames as SDL_Texture:s 
  *
  * - video thread writes texture data to pixel_buf.    <-----------------+
- * - main thread waits for video to finish if necessary (hopefully not)  |
  * - main thread swaps the textures, points pixel_buf to the data of     |
  *   next_frame and signals to video thread that it can begin decoding   |
      the next frame                                                      |
@@ -27,7 +26,7 @@ struct FrameBuffer create_framebuffer(
 );
 /* swaps the buffers and signals that a new frame should be aquired.
  * fb->current_frame is ok to use until this function is called again on fb. */
-void framebuffer_swap(struct FrameBuffer * fb);
+int framebuffer_swap(struct FrameBuffer * fb);
 
 struct InternalData;
 
@@ -35,9 +34,13 @@ struct PlaybackCtx {
     AVRational time_base;
     int start_time, duration;
     int width, height;
+    bool paused;
     struct InternalData * internal_data;
 };
 
+void play_pause(struct PlaybackCtx * pb_ctx);
+
 struct PlaybackCtx * open_for_playback(char * filename);
 void playback_to_framebuffer(struct PlaybackCtx * pb_ctx, struct FrameBuffer * fb);
+void destroy_playback_ctx(struct PlaybackCtx * pb_ctx);
 
