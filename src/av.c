@@ -1,6 +1,6 @@
 #include "av.h"
-#include "playback.h"
 #include "draw.h"
+#include "playback/playback.h"
 #include <SDL2/SDL_assert.h>
 #include <SDL2/SDL_atomic.h>
 #include <SDL2/SDL_audio.h>
@@ -110,18 +110,11 @@ static struct PlayerState default_state(void) {
     };
 }
 
-
-int main(int argc, char * argv[]) {
-    if (argc < 2) {
-        fprintf(stderr, "provide filename\n");
+int init_sdl(SDL_Renderer * renderer, SDL_Window * window) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
+        fprintf(stderr, "failed to initialize SDL");
         return -1;
-    }
-    char * filename = argv[1];
-
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) return 1;
-
-    SDL_Window * window;
-    SDL_Renderer * renderer;
+    };
 
     SDL_CreateWindowAndRenderer(
         1000, 1000, 0,
@@ -131,6 +124,21 @@ int main(int argc, char * argv[]) {
         fprintf(stderr, "failed to open window");
         return -1;
     }
+    return 0;
+}
+
+
+int main(int argc, char * argv[]) {
+    if (argc < 2) {
+        fprintf(stderr, "provide filename\n");
+        return -1;
+    }
+    char * filename = argv[1];
+
+    SDL_Renderer * renderer;
+    SDL_Window * window;
+    init_sdl(renderer, window);
+
 
     TTF_Init();
     TTF_Font * font = default_font(13);
@@ -139,7 +147,6 @@ int main(int argc, char * argv[]) {
 
     struct ColorScheme colors = default_colors();
     struct PlayerState player_state = default_state();
-    SDL_Event event;
 
 
     struct Layout layout = get_layout(
@@ -164,10 +171,12 @@ int main(int argc, char * argv[]) {
         av_mul_q(pb_ctx->time_base, (AVRational){ CLOCKS_PER_SEC, 1 });
     AVRational time_base = pb_ctx->time_base;
 
+
     while (!quit) {
-        struct timespec start, finish;
+        SDL_Event event;
+        struct timespec frame_start, frame_finish;
         double elapsed;
-        clock_gettime(CLOCK_MONOTONIC, &start);
+        clock_gettime(CLOCK_MONOTONIC, &frame_start);
         enum Action action;
 
         SDL_PumpEvents();
@@ -190,23 +199,21 @@ int main(int argc, char * argv[]) {
 
         draw_progress(
             renderer, layout.progress_rect, 
-            SECS(ts),
-            SECS(pb_ctx->duration),
+            SECS(ts), SECS(pb_ctx->duration),
             &colors
         );
         draw_timeline(
             renderer, font, layout.timeline_rect,
-            SECS(pb_ctx->start_time),
-            SECS(ts),
-            SECS(pb_ctx->duration),
-            &colors
+            SECS(pb_ctx->start_time), SECS(ts),
+            SECS(pb_ctx->duration), &colors
         );
         SDL_RenderPresent(renderer);
 
         do {
-            clock_gettime(CLOCK_MONOTONIC, &finish);
-            elapsed = finish.tv_sec - start.tv_sec + (finish.tv_nsec - start.tv_nsec) / 1000000000.0;
+            clock_gettime(CLOCK_MONOTONIC, &frame_finish);
+            elapsed = frame_finish.tv_sec - frame_start.tv_sec + (frame_finish.tv_nsec - frame_start.tv_nsec) / 1000000000.0;
         } while (elapsed < min_frame_time);
+
         ts += elapsed/av_q2d(pb_ctx->time_base);
     }
 
