@@ -17,25 +17,85 @@ bool quit = false;
 #define TIMELINE_HEIGHT 38
 #define PROGRESS_HEIGHT 20
 
-struct PlayerState {
-    int window_w, window_h;
-    double cur_timestamp;
-    bool playing;
+enum EventType {
+    EVENT_NONE,
+    EVENT_PAUSE,
+    EVENT_SEEK,
+    EVENT_RESIZE,
+    EVENT_QUIT
 };
 
-enum Action {
-    SEEK_FWD = 1 << 1,
-    SEEK_BACK = 1 << 2,
-    WINDOW_RESIZE = 1 << 3,
-    PLAY_PAUSE = 1 << 4,
-    QUIT = 1 << 5,
+struct Event {
+    uint32_t type;
+    union {
+        double seconds;
+        struct {
+            int w, h;
+        };
+    };
 };
 
+struct QueuedEvent {
+    struct Event event;
+    struct QueuedEvent * next;
+};
 
-static enum Action handle_event(
-    SDL_Event * event,
-    struct PlayerState * state,
-    const struct Layout * layout
+struct EventQueue {
+    struct QueuedEvent * first;
+    struct QueuedEvent * last;
+    int count;
+};
+
+struct EventQueue create_event_queue(void) {
+    return (struct EventQueue) {
+        NULL, NULL, 0
+    };
+}
+
+void queue_event(struct EventQueue * eventq, struct Event event) {
+
+    struct QueuedEvent * qd_event = malloc(sizeof(struct QueuedEvent));
+
+    *qd_event = (struct QueuedEvent){
+        .event = event,
+        .next = NULL
+    };
+
+    if (eventq->last) {
+        eventq->last->next = qd_event;
+        eventq->last = qd_event;
+    } else {
+        eventq->first = eventq->last = qd_event;
+    }
+
+    eventq->count++;
+}
+
+struct Event poll_events(struct EventQueue * eventq) {
+
+    struct Event event = { .type = EVENT_NONE };
+
+    if (eventq->count) {
+        struct QueuedEvent * qd_event = eventq->first;
+        event = qd_event->event;
+        if (eventq->last == eventq->first) {
+            eventq->last = eventq->first = NULL;
+        } else {
+            eventq->first = eventq->first->next;
+        }
+        free(qd_event);
+        eventq->count--;
+    }
+
+    return event;
+
+}
+
+
+static uint64_t handle_event(
+    SDL_Event * sdl_event,
+    struct EventQueue * eventq,
+    struct Layout * layout
 ) {
     int nkeys;
     const uint8_t * keys = SDL_GetKeyboardState(&nkeys);
@@ -43,55 +103,43 @@ static enum Action handle_event(
     int mouse_x, mouse_y;
     SDL_GetMouseState(&mouse_x, &mouse_y);
 
-    switch (event->type) {
-        /*case SDL_MOUSEWHEEL: TODO: reimpliment
+    switch (sdl_event->type) {
+        case SDL_MOUSEWHEEL:
             if (SDL_PointInRect(&(SDL_Point){ mouse_x, mouse_y }, &layout->timeline_rect)) {
-                double seek_by;
-                double new_ts;
+
                 if (keys[SDL_SCANCODE_LSHIFT])
-                    seek_by = event->wheel.y * 1.0;
-                else if (keys[SDL_SCANCODE_LCTRL])
-                    seek_by = event->wheel.y * 1.0/vid->avg_fps;
+                    queue_event(
+                        eventq, (struct Event){ EVENT_SEEK, .seconds = sdl_event->wheel.y * 2.0 }
+                    );
                 else
-                    seek_by = event->wheel.y * 10.0/vid->avg_fps;
-
-                new_ts = state->cur_timestamp + seek_by;
-
-                if (new_ts < vid->start_time) {
-                    state->cur_timestamp = vid->start_time;
-                    return SEEK_BACK;
-                } else if (new_ts > vid->duration) {
-                    state->cur_timestamp = vid->duration;
-                    return SEEK_FWD;
-                } else {
-                    state->cur_timestamp = new_ts;
-                    if (seek_by > 0)
-                        return SEEK_FWD;
-                    else
-                        return SEEK_BACK;
-                }
+                    queue_event(
+                        eventq, (struct Event){ EVENT_SEEK, .seconds = sdl_event->wheel.y * 0.5 }
+                    );
             }
             break;
 
-        */
         case SDL_KEYDOWN:
-            switch (event->key.keysym.sym) {
-                case SDLK_ESCAPE:
-                    return QUIT;
+            switch (sdl_event->key.keysym.sym) {
                 case SDLK_SPACE:
-                    state->playing = !state->playing;
-                    return PLAY_PAUSE;
+                    queue_event( eventq, (struct Event){ EVENT_PAUSE });
+                    break;
+                case SDLK_ESCAPE:
+                    queue_event( eventq, (struct Event){ EVENT_QUIT });
+                    break;
             }
             break;
 
         case SDL_QUIT:
-            return QUIT;
+            queue_event( eventq, (struct Event){ EVENT_QUIT });
 
         case SDL_WINDOWEVENT:
-            if (event->window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
-                state->window_w = event->window.data1;
-                state->window_h = event->window.data2;
-                return WINDOW_RESIZE;
+            if (sdl_event->window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+                queue_event(eventq, (struct Event) {
+                    EVENT_RESIZE, {
+                        .w = sdl_event->window.data1,
+                        .h = sdl_event->window.data2 
+                    }
+                });
             }
             break;
     }
@@ -100,14 +148,6 @@ static enum Action handle_event(
 
 static TTF_Font * default_font(int size) {
     return TTF_OpenFont("fonts/RobotoMono-Regular.ttf", size);
-}
-
-static struct PlayerState default_state(void) {
-    return (struct PlayerState) {
-        .window_h = 1000,
-        .window_w = 1000,
-        .playing = false,
-    };
 }
 
 int init_sdl(SDL_Renderer ** renderer, SDL_Window ** window) {
@@ -130,7 +170,7 @@ int init_sdl(SDL_Renderer ** renderer, SDL_Window ** window) {
 
 int main(int argc, char * argv[]) {
     if (argc < 2) {
-        fprintf(stderr, "provide filename\n");
+        fprintf(stderr, "provide filename\n\n");
         return -1;
     }
     char * filename = argv[1];
@@ -146,13 +186,19 @@ int main(int argc, char * argv[]) {
     struct PlaybackCtx * pb_ctx = open_for_playback(filename);
 
     struct ColorScheme colors = default_colors();
-    struct PlayerState player_state = default_state();
 
 
-    struct Layout layout = get_layout(
-        player_state.window_w, player_state.window_h,
-        pb_ctx->height, pb_ctx->width, TIMELINE_HEIGHT, PROGRESS_HEIGHT
-    );
+
+    struct Layout layout;
+    {
+        int w, h;
+        SDL_GetWindowSize(window, &w, &h);
+
+        layout = get_layout(
+            w, h,
+            pb_ctx->height, pb_ctx->width, TIMELINE_HEIGHT, PROGRESS_HEIGHT
+        );
+    }
 
     struct FrameBuffer framebuffer = create_framebuffer(
         renderer, SDL_PIXELFORMAT_RGB24,
@@ -161,7 +207,7 @@ int main(int argc, char * argv[]) {
 
     playback_to_framebuffer(pb_ctx, &framebuffer);
 
-    framebuffer_swap(&framebuffer);
+    framebuffer_swap(&framebuffer, true);
 
     double ts = pb_ctx->start_time;
     double next_frame_ts = ts;
@@ -172,54 +218,92 @@ int main(int argc, char * argv[]) {
     AVRational time_base = pb_ctx->time_base;
 
 
+    bool paused = true;
+
+    struct EventQueue eventq = create_event_queue();
+
     while (!quit) {
-        SDL_Event event;
         struct timespec frame_start, frame_finish;
         double elapsed;
         clock_gettime(CLOCK_MONOTONIC, &frame_start);
-        enum Action action = 0;
+        /* if the current timestamp is greater than the timestamp of the next
+         * frame, it's time to display a new frame. if we have a new frame we
+         * definitely need to redraw the video */
+        bool newframe = (ts >= next_frame_ts);
+        bool redraw_ui = !paused;
+        bool redraw_video = newframe;
+        #define SECS(TIME_BASE) av_q2d(av_mul_q((AVRational) { (TIME_BASE), 1 }, pb_ctx->time_base))
+        #define TIME_BASE(SECS) av_q2d(av_div_q( av_d2q(SECS, 0xffff), pb_ctx->time_base))
 
         SDL_PumpEvents();
-        while (SDL_PollEvent(&event)) {
-            action |= handle_event(
-                &event, &player_state, &layout
-            );
+        SDL_Event * sdl_event = &(SDL_Event){};
+        while (SDL_PollEvent(sdl_event)) {
+            handle_event(sdl_event, &eventq, &layout);
         }
 
-        if (action & QUIT) quit = true;
+        struct Event event = poll_events(&eventq);
+        switch (event.type) {
+            case EVENT_NONE: break;
+            case EVENT_QUIT:
+                quit = true;
+                break;
 
-        if (action & PLAY_PAUSE) {
-            play_pause(pb_ctx);
+            case EVENT_PAUSE: 
+                paused = !paused; 
+                break;
+
+            case EVENT_RESIZE:
+                layout = get_layout(
+                    event.w, event.h,
+                    pb_ctx->height, pb_ctx->width,
+                    TIMELINE_HEIGHT, PROGRESS_HEIGHT
+                );
+                redraw_ui = true;
+                break;
+
+            case EVENT_SEEK:
+                ts = ts + TIME_BASE(event.seconds);
+                ts = next_frame_ts =
+                    MIN(MAX(ts, pb_ctx->start_time), pb_ctx->duration);
+                seek(pb_ctx, ts);
+                framebuffer_swap(&framebuffer, true);
+                framebuffer_swap(&framebuffer, true);
+                redraw_video = true;
+                break;
         }
 
-        if (ts >= next_frame_ts) {
+        if (redraw_video) {
             draw_background(renderer, &colors);
             SDL_RenderCopy(renderer, framebuffer.frame, NULL, &layout.viewer_rect);
-            next_frame_ts += framebuffer.duration;
-            framebuffer_swap(&framebuffer);
+            redraw_ui = true;
         }
 
-        #define SECS(TIME) av_q2d(av_mul_q((AVRational) { TIME, 1 }, pb_ctx->time_base))
+        if (newframe) {
+            if (!framebuffer_swap(&framebuffer, false)) {
+                next_frame_ts += framebuffer.duration;
+            }
+        }
 
-        draw_progress(
-            renderer, layout.progress_rect, 
-            SECS(ts), SECS(pb_ctx->duration),
-            &colors
-        );
-        draw_timeline(
-            renderer, font, layout.timeline_rect,
-            SECS(pb_ctx->start_time), SECS(ts),
-            SECS(pb_ctx->duration), &colors
-        );
-        SDL_RenderPresent(renderer);
-
+        if (redraw_ui) {
+            draw_progress(
+                renderer, layout.progress_rect, 
+                SECS(ts), SECS(pb_ctx->duration),
+                &colors
+            );
+            draw_timeline(
+                renderer, font, layout.timeline_rect,
+                SECS(pb_ctx->start_time), SECS(ts),
+                SECS(pb_ctx->duration), &colors
+            );
+            SDL_RenderPresent(renderer);
+        }
 
         do {
             clock_gettime(CLOCK_MONOTONIC, &frame_finish);
             elapsed = frame_finish.tv_sec - frame_start.tv_sec + (frame_finish.tv_nsec - frame_start.tv_nsec) / 1000000000.0;
         } while (elapsed < min_frame_time);
 
-        if (!pb_ctx->paused)
+        if (!paused)
             ts += elapsed/av_q2d(pb_ctx->time_base);
     }
 

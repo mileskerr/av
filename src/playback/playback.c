@@ -2,6 +2,8 @@
 #include "parallel.h"
 #include <libavformat/avformat.h>
 
+extern bool quit;
+
 
 struct InternalData {
     SDL_Thread * demuxer, * vdecoder, * adecoder;
@@ -104,6 +106,7 @@ void playback_to_framebuffer(struct PlaybackCtx * pb_ctx, struct FrameBuffer * f
     id->decoded_pktq = create_packet_queue();
     id->msgq_out_demux = create_message_queue();
     id->msgq_out_vdec = create_message_queue();
+    id->msgq_in = create_message_queue();
 
     pktq_fill(&id->decoded_pktq);
 
@@ -116,6 +119,7 @@ void playback_to_framebuffer(struct PlaybackCtx * pb_ctx, struct FrameBuffer * f
             &id->demuxed_apktq,
             &id->decoded_pktq,
             &id->msgq_out_demux,
+            &id->msgq_in,
             id->vstream_idx,
             id->astream_idx
         }
@@ -127,6 +131,7 @@ void playback_to_framebuffer(struct PlaybackCtx * pb_ctx, struct FrameBuffer * f
             &id->demuxed_vpktq,
             &id->decoded_pktq,
             &id->msgq_out_vdec,
+            &id->msgq_in,
             fb,
         }
     );
@@ -134,8 +139,18 @@ void playback_to_framebuffer(struct PlaybackCtx * pb_ctx, struct FrameBuffer * f
     while (threads_initialized < 2);
 }
 
+void seek(struct PlaybackCtx * pb_ctx, int ts) {
+    struct InternalData * id = pb_ctx->internal_data;
 
-void play_pause(struct PlaybackCtx * pb_ctx) {
+    uint32_t * content = malloc(8);
+
+    content[0] = SEEK;
+    content[1] = ts;
+
+    msgq_send(&id->msgq_out_demux, content);
+}
+
+/*void play_pause(struct PlaybackCtx * pb_ctx) {
     struct InternalData * id = pb_ctx->internal_data;
 
     uint32_t * content = malloc(4);
@@ -151,7 +166,7 @@ void play_pause(struct PlaybackCtx * pb_ctx) {
     pb_ctx->paused = !pb_ctx->paused;
 
 }
-
+*/
 void destroy_playback_ctx(struct PlaybackCtx * pb_ctx) {
     struct InternalData * id = pb_ctx->internal_data;
     SDL_WaitThread(id->vdecoder, NULL);

@@ -5,6 +5,7 @@
 #include <SDL2/SDL_mutex.h>
 #include <SDL2/SDL_thread.h>
 #include <libavcodec/packet.h>
+#include <libavformat/avformat.h>
 #include <libavutil/error.h>
 
 extern bool quit;
@@ -112,7 +113,6 @@ void msgq_send(struct MessageQueue * msgq, void * content) {
 void msgq_receive(struct MessageQueue * msgq, void ** content) {
     SDL_LockMutex(msgq->mutex);
 
-    int ret;
     if (msgq->count) {
         struct Message * got_msg = msgq->first;
         *content = got_msg->content;
@@ -170,16 +170,19 @@ static void pktq_drain(struct PacketQueue * src, struct PacketQueue * dst) {
     SDL_LockMutex(src->mutex);
     SDL_LockMutex(dst->mutex);
 
+
     int dst_back = (dst->front_idx + SDL_SemValue(dst->capacity)) % PACKET_QUEUE_SIZE;
     int src_front = src->front_idx;
 
-    for (int i = 0; i < SDL_SemValue(src->capacity); i++) {
+    int iters = SDL_SemValue(src->capacity);
+    for (int i = 0; i < iters; i++) {
         int src_idx = (src_front + i) % PACKET_QUEUE_SIZE;
         int dst_idx = (dst_back + i) % PACKET_QUEUE_SIZE;
         dst->data[dst_idx] = src->data[src_idx];
         SDL_SemPost(dst->capacity);
         SDL_SemWait(src->capacity);
     }
+
 
     SDL_UnlockMutex(src->mutex);
     SDL_UnlockMutex(dst->mutex);
@@ -215,8 +218,12 @@ void destroy_framebuffer(struct FrameBuffer * fb) {
     SDL_DestroyMutex(fb->mutex);
 }
 
-int framebuffer_swap(struct FrameBuffer * fb) {
-    if (SDL_TryLockMutex(fb->mutex)) return 1;
+int framebuffer_swap(struct FrameBuffer * fb, bool wait) {
+    if (wait) {
+        SDL_LockMutex(fb->mutex);
+    } else {
+        if (SDL_TryLockMutex(fb->mutex)) return 1;
+    }
 
     if (fb->frame_needed); /* we haven't even started decoding this frame yet. lets not get ahead of ourselves */
     else {
@@ -256,21 +263,52 @@ void frame_ready(struct FrameBuffer * fb) {
     SDL_UnlockMutex(fb->mutex);
 }
 
+#define DONT_DISPLAY 1
+
 int demuxing_thread(void * data) {
     struct DemuxInfo * info = data;
     AVFormatContext * format_ctx = info->format_ctx;
     struct PacketQueue * decoded_pktq = info->decoded_pktq;
     struct PacketQueue * demuxed_vpktq = info->demuxed_vpktq;
     struct PacketQueue * demuxed_apktq = info->demuxed_apktq;
-    struct MessageQueue * msgq = info->msgq_in;
+    struct MessageQueue * msgq_in = info->msgq_in;
+    struct MessageQueue * msgq_out = info->msgq_out;
     int vstream_idx = info->vstream_idx;
     int astream_idx = info->astream_idx;
 
     threads_initialized += 1;
 
+    uint32_t * msg;
+
+    int start_time = format_ctx->streams[vstream_idx]->start_time;
+    int seek_time = start_time - 1;
+
+    bool seeking = false;
+    int last_ts = start_time;
 
     while (!quit) {
 
+        msgq_receive(msgq_in, (void**)&msg);
+
+        if (!msg) goto nomsg;
+
+        switch (*msg) {
+            case SEEK: {
+                seek_time = msg[1];
+                seeking = true;
+
+                if (avformat_seek_file(
+                    format_ctx, vstream_idx,
+                    start_time , seek_time,
+                    seek_time, 0
+                )) break;
+
+
+                pktq_drain(demuxed_vpktq, decoded_pktq);
+            }
+        }
+
+        nomsg:;
         
         AVPacket * pkt = dequeue_pkt(decoded_pktq);
 
@@ -281,9 +319,20 @@ int demuxing_thread(void * data) {
             /* the packet must be recycled into the queue if we aren't decoding it */
             fprintf(stderr, "%s", av_err2str(ret));
             queue_pkt(decoded_pktq, pkt);
-        } else if (pkt->stream_index == vstream_idx)
+        } else if (pkt->stream_index == vstream_idx) {
+            pkt->opaque = (void *)0;
+            if (pkt->dts < seek_time) {
+                pkt->opaque = (void *)DONT_DISPLAY;
+            } else if (seeking) {
+                seeking = false;
+                uint32_t * content = malloc(8);
+                content[0] = TS_CHANGED;
+                content[1] = last_ts;
+                msgq_send(msgq_out, content);
+            }
+            last_ts = pkt->dts;
             queue_pkt(demuxed_vpktq, pkt);
-        else
+        } else
             queue_pkt(decoded_pktq, pkt);
     }
     return 0;
@@ -377,7 +426,7 @@ int audio_thread(void * data) {
 int video_thread(void * data) {
     struct VideoInfo * info = data;
     AVCodecContext * codec_ctx = info->codec_ctx;
-    struct MessageQueue * msgq = info->msgq_in;
+    struct MessageQueue * msgq_in = info->msgq_in;
     struct PacketQueue * demuxed_pktq = info->demuxed_pktq;
     struct PacketQueue * decoded_pktq = info->decoded_pktq;
     struct FrameBuffer * fb = info->fb;
@@ -390,45 +439,28 @@ int video_thread(void * data) {
         codec_ctx, AV_PIX_FMT_RGB24, get_texture_pitch(fb->frame)
     );
 
-    bool paused;
     uint32_t * msg;
 
     while (!quit) {
-        msgq_receive(msgq, (void**)&msg);
-
-        if (!msg) goto nomsg;
-        switch (*msg) {
-            case PLAY:
-                paused = false;  
-                printf("playing\n");
-            case PAUSE: {
-                paused = true;
-                printf("pauseing\n");
-            }
-        }
-
-        free(msg);
-        if (paused) { 
-            usleep(50);
-            continue;
-        }
-
-        nomsg:
-        wait_for_frame_needed(fb);
+        //msgq_receive(msgq, (void**)&msg);
 
         AVPacket * pkt = dequeue_pkt(demuxed_pktq);
 
-        int ret;
-        if ((ret = decode_frame(codec_ctx, pkt, frame)))
-            fprintf(stderr, "%s\n", av_err2str(ret));
-        else {
+        bool display = !((uint64_t)pkt->opaque == DONT_DISPLAY);
+
+
+        int error;
+        if ((error = decode_frame(codec_ctx, pkt, frame)))
+            fprintf(stderr, "%s\n", av_err2str(error));
+
+        if (display && !error) {
+            wait_for_frame_needed(fb);
             convert_frame(&frame_conv, frame, fb->pixel_buf);
+            fb->next_duration = pkt->duration;
+            frame_ready(fb);
         }
+
         queue_pkt(decoded_pktq, pkt);
-
-        fb->next_duration = pkt->duration;
-
-        frame_ready(fb);
     }
     return 0;
 }

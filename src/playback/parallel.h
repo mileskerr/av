@@ -27,8 +27,16 @@ void msgq_receive(struct MessageQueue * msgq, void ** content);
 void msgq_send(struct MessageQueue * msgq, void * content);
 
 enum MsgCode {
-    PLAY = true,
-    PAUSE = false,
+/*  PLAY = true,
+    PAUSE = false, */
+
+    /* from main thread */
+    SEEK,
+    NEXT_FRAME,
+    PREV_FRAME,
+
+    /* to main thread */
+    TS_CHANGED,
 };
 
 struct MessageQueue {
@@ -49,6 +57,7 @@ struct DemuxInfo {
     struct PacketQueue * demuxed_apktq;
     struct PacketQueue * decoded_pktq;
     struct MessageQueue * msgq_in;
+    struct MessageQueue * msgq_out;
     int vstream_idx;
     int astream_idx;
 };
@@ -66,6 +75,7 @@ struct VideoInfo {
     struct PacketQueue * demuxed_pktq;
     struct PacketQueue * decoded_pktq;
     struct MessageQueue * msgq_in;
+    struct MessageQueue * msgq_out;
     struct FrameBuffer * fb;
 };
 int video_thread(void *);
