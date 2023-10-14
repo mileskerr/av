@@ -1,4 +1,4 @@
-#include "playback.h"
+#include "playback_threads.h"
 #include <SDL2/SDL_mutex.h>
 #include <SDL2/SDL_thread.h>
 #include <libavcodec/packet.h>
@@ -167,6 +167,12 @@ struct FrameBuffer create_framebuffer(
     return ret;
 }
 
+void destroy_framebuffer(struct FrameBuffer * fb) {
+    SDL_DestroyTexture(fb->frame);
+    SDL_DestroyTexture(fb->next_frame);
+    SDL_DestroyMutex(fb->mutex);
+}
+
 void framebuffer_swap(struct FrameBuffer * fb) {
     SDL_LockMutex(fb->mutex);
 
@@ -321,6 +327,8 @@ int video_thread(void * data) {
     AVCodecContext * codec_ctx = info->codec_ctx;
     struct PacketQueue * demuxed_pktq = info->demuxed_pktq;
     struct PacketQueue * decoded_pktq = info->decoded_pktq;
+    printf("info->demuxed_pktq: %ld\n", (long unsigned int) info->demuxed_pktq);
+    printf("demuxed_pktq: %ld\n", (long unsigned int) demuxed_pktq);
     struct FrameBuffer * fb = info->fb;
 
     AVFrame * frame = av_frame_alloc();

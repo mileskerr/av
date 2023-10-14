@@ -14,18 +14,8 @@ bool quit = false;
 #define SDL_AUDIO_FMT AUDIO_S16SYS
 #define SDL_AUDIO_SAMPLES 1024
 
-
-static AVCodecContext * open_codec_context(AVFormatContext * format_ctx, int stream_idx) {
-    const AVCodecParameters * codecpar = format_ctx->streams[stream_idx]->codecpar;
-    const AVCodec * codec = avcodec_find_decoder(codecpar->codec_id);
-    if (codec == NULL) return NULL;
-    AVCodecContext * codec_ctx = avcodec_alloc_context3(codec);
-    if (avcodec_parameters_to_context(codec_ctx, codecpar))
-        return NULL;
-    if (avcodec_open2(codec_ctx, codec, NULL))
-        return NULL;
-    return codec_ctx;
-}
+#define TIMELINE_HEIGHT 38
+#define PROGRESS_HEIGHT 20
 
 struct PlayerState {
     int window_w, window_h;
@@ -112,7 +102,6 @@ static TTF_Font * default_font(int size) {
     return TTF_OpenFont("fonts/RobotoMono-Regular.ttf", size);
 }
 
-/* get default viewer state. */
 static struct PlayerState default_state(void) {
     return (struct PlayerState) {
         .window_h = 1000,
@@ -129,56 +118,6 @@ int main(int argc, char * argv[]) {
     }
     char * filename = argv[1];
 
-    /* get codecs and format */
-    
-    AVFormatContext * format_ctx = NULL;
-    if (avformat_open_input(&format_ctx, filename, NULL, NULL)) {
-        fprintf(stderr, "failed to open `%s`", filename);
-        return -1;
-    }
-
-    avformat_find_stream_info(format_ctx, NULL);
-
-    int vstream_idx = 
-        av_find_best_stream(format_ctx, AVMEDIA_TYPE_VIDEO, -1,-1, NULL, 0);
-
-    int astream_idx =
-        av_find_best_stream(format_ctx, AVMEDIA_TYPE_AUDIO, -1,-1, NULL, 0);
-
-    if (vstream_idx < 0) {
-        fprintf(stderr, "failed to find video stream");
-        return -1;
-    }
-
-    /* if there's no audio stream, no problem. */
-    AVStream * astream;
-    AVCodecContext * acodec_ctx;
-    if (astream_idx < 0) {
-        astream = NULL;
-        acodec_ctx = NULL;
-    } else {
-        astream = format_ctx->streams[astream_idx];
-        acodec_ctx = open_codec_context(format_ctx, astream_idx);
-        if (acodec_ctx == NULL) {
-            fprintf(stderr, "unsupported audio codec");
-            astream = NULL;
-            astream_idx = -1;
-        }
-    }
-
-    AVStream * vstream = format_ctx->streams[vstream_idx];
-
-    AVCodecContext * vcodec_ctx =
-        open_codec_context(format_ctx, vstream_idx);
-
-
-    if (vcodec_ctx == NULL) {
-        fprintf(stderr, "unsupported video codec");
-        return -1;
-    }
-
-    /* initialize SDL */
-
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) return 1;
 
     SDL_Window * window;
@@ -193,92 +132,37 @@ int main(int argc, char * argv[]) {
         return -1;
     }
 
-    int num_adev = SDL_GetNumAudioDevices(0);
-    printf("%d\n",num_adev);
-    for (int i = 0; i < num_adev; i++) {
-        printf("%d: %s\n", i, SDL_GetAudioDeviceName(i, 0));
-    }
-
-
     TTF_Init();
     TTF_Font * font = default_font(13);
 
-
-
-
-    /* misc initializations */
+    struct PlaybackCtx * pb_ctx = open_for_playback(filename);
 
     struct ColorScheme colors = default_colors();
     struct PlayerState player_state = default_state();
     SDL_Event event;
 
-    #define TIMELINE_HEIGHT 38
-    #define PROGRESS_HEIGHT 20
 
     struct Layout layout = get_layout(
         player_state.window_w, player_state.window_h,
-        vcodec_ctx->height, vcodec_ctx->width, TIMELINE_HEIGHT, PROGRESS_HEIGHT
+        pb_ctx->height, pb_ctx->width, TIMELINE_HEIGHT, PROGRESS_HEIGHT
     );
 
     struct FrameBuffer framebuffer = create_framebuffer(
         renderer, SDL_PIXELFORMAT_RGB24,
-        vcodec_ctx->width, vcodec_ctx->height
+        pb_ctx->width, pb_ctx->height
     );
 
-    struct PacketQueue demuxed_apktq = create_packet_queue();
-    struct PacketQueue demuxed_vpktq = create_packet_queue();
-    struct PacketQueue decoded_pktq = create_packet_queue();
+    playback_to_framebuffer(pb_ctx, &framebuffer);
 
-    pktq_fill(&decoded_pktq);
-
-
-    SDL_Thread * demuxer = SDL_CreateThread(
-        demuxing_thread, "Demuxer", 
-        (void *) &(struct DemuxInfo) {
-            format_ctx,
-            &demuxed_apktq,
-            &demuxed_vpktq,
-            &decoded_pktq,
-            vstream_idx,
-            astream_idx
-        }
-    );
-    SDL_Thread * vdecoder = SDL_CreateThread(
-        video_thread, "Video Decoder", 
-        (void *) &(struct VideoInfo) {
-            vcodec_ctx,
-            &demuxed_apktq,
-            &decoded_pktq,
-            &framebuffer,
-        }
-    );
-    /*
-    SDL_Thread * adecoder = SDL_CreateThread(
-        video_thread, "Audio Decoder", 
-        (void *) &(struct AudioInfo) {
-            vcodec_ctx,
-            &demuxed_apktq,
-            &demuxed_vpktq
-        }
-    );*/
-
-
-
-    /* aquire first frame */
     framebuffer_swap(&framebuffer);
 
-    double ts = vstream->start_time;
+    double ts = pb_ctx->start_time;
     double next_frame_ts = ts;
     double min_frame_time = 1.0/144.0;
 
-
     AVRational clocks_per_time_base =
-        av_mul_q(vstream->time_base, (AVRational){ CLOCKS_PER_SEC, 1 });
-    AVRational time_base = vstream->time_base;
-    printf("time_base: %d/%d\n", time_base.num, time_base.den);
-    printf("clocks_per_sec: %ld\n", CLOCKS_PER_SEC);
-    printf("clocks_per_tb: %d/%d\n", clocks_per_time_base.num, clocks_per_time_base.den);
-
+        av_mul_q(pb_ctx->time_base, (AVRational){ CLOCKS_PER_SEC, 1 });
+    AVRational time_base = pb_ctx->time_base;
 
     while (!quit) {
         struct timespec start, finish;
@@ -286,7 +170,6 @@ int main(int argc, char * argv[]) {
         clock_gettime(CLOCK_MONOTONIC, &start);
         enum Action action;
 
-        /* handle events */
         SDL_PumpEvents();
         while (SDL_PollEvent(&event)) {
             action |= handle_event(
@@ -303,19 +186,19 @@ int main(int argc, char * argv[]) {
             framebuffer_swap(&framebuffer);
         }
 
-        #define SECS(TIME) av_q2d(av_mul_q((AVRational) { TIME, 1 }, vstream->time_base))
+        #define SECS(TIME) av_q2d(av_mul_q((AVRational) { TIME, 1 }, pb_ctx->time_base))
 
         draw_progress(
             renderer, layout.progress_rect, 
             SECS(ts),
-            SECS(vstream->duration),
+            SECS(pb_ctx->duration),
             &colors
         );
         draw_timeline(
             renderer, font, layout.timeline_rect,
-            SECS(vstream->start_time),
+            SECS(pb_ctx->start_time),
             SECS(ts),
-            SECS(vstream->duration),
+            SECS(pb_ctx->duration),
             &colors
         );
         SDL_RenderPresent(renderer);
@@ -324,14 +207,11 @@ int main(int argc, char * argv[]) {
             clock_gettime(CLOCK_MONOTONIC, &finish);
             elapsed = finish.tv_sec - start.tv_sec + (finish.tv_nsec - start.tv_nsec) / 1000000000.0;
         } while (elapsed < min_frame_time);
-        ts += elapsed/av_q2d(vstream->time_base);
+        ts += elapsed/av_q2d(pb_ctx->time_base);
     }
 
-    /* clean up */
-    SDL_WaitThread(vdecoder, NULL);
-    SDL_WaitThread(demuxer, NULL);
-    avformat_close_input(&format_ctx);
-    avcodec_free_context(&vcodec_ctx);
+    destroy_framebuffer(&framebuffer);
+
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();

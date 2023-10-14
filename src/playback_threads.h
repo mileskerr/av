@@ -41,6 +41,7 @@ struct FrameBuffer {
     bool frame_needed;
     SDL_mutex * mutex;
 };
+void destroy_framebuffer(struct FrameBuffer * fb);
 struct FrameBuffer create_framebuffer(
     SDL_Renderer * renderer, SDL_PixelFormatEnum pixel_format,
     uint32_t width, uint32_t height
