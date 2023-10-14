@@ -1,4 +1,5 @@
 #include "playback.h"
+#include "parallel.h"
 #include <libavformat/avformat.h>
 
 

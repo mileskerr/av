@@ -1,23 +1,31 @@
 CC := gcc
-CFLAGS := -Wall -lSDL2 -lSDL2_ttf -lm -lavformat -lavcodec -lswscale -lavutil -lswresample -lz
 DEBUGFLAGS := -g -O0
+RELEASEFLAGS := -O3
+CFLAGS := -Wall $(DEBUGFLAGS)
+LDFLAGS := -lSDL2 -lSDL2_ttf -lm -lavformat -lavcodec -lswscale -lavutil -lswresample -lz
 #-fsanitize=address
 #LDFLAGS := -static-libasan
-RELEASEFLAGS := -O3
 APP_NAME := av
 
 SRC_DIR := src
+OBJ_DIR := obj
 BUILD_DIR := build
 
 SRCS := $(shell find $(SRC_DIR) -name '*.c')
-OBJS := $(SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
+OBJS := $(SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 
 all: $(OBJS)
-	$(CC) $(DEBUGFLAGS) $(CFLAGS) $(OBJS) -o $(BUILD_DIR)/$(APP_NAME)
-
-$(BUILD_DIR)/%.o : $(SRC_DIR)/%.c
 	mkdir -p $(BUILD_DIR)
-	$(CC) $(DEBUGFLAGS) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(OBJS) -o $(BUILD_DIR)/$(APP_NAME) $(LDFLAGS)
+
+$(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
+	$(info @a)
+	mkdir -p $(OBJ_DIR)
+	mkdir -p '$(@D)'
+	$(CC) $(CFLAGS) -c $< -o $@
+
+
 
 clean:
 	rm -r $(BUILD_DIR)
+	rm -r $(OBJ_DIR)

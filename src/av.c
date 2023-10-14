@@ -110,7 +110,7 @@ static struct PlayerState default_state(void) {
     };
 }
 
-int init_sdl(SDL_Renderer * renderer, SDL_Window * window) {
+int init_sdl(SDL_Renderer ** renderer, SDL_Window ** window) {
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
         fprintf(stderr, "failed to initialize SDL");
         return -1;
@@ -118,7 +118,7 @@ int init_sdl(SDL_Renderer * renderer, SDL_Window * window) {
 
     SDL_CreateWindowAndRenderer(
         1000, 1000, 0,
-        &window, &renderer
+        window, renderer
     );
     if ((window == NULL) || (renderer == NULL)) {
         fprintf(stderr, "failed to open window");
@@ -137,7 +137,7 @@ int main(int argc, char * argv[]) {
 
     SDL_Renderer * renderer;
     SDL_Window * window;
-    init_sdl(renderer, window);
+    init_sdl(&renderer, &window);
 
 
     TTF_Init();

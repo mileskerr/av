@@ -46,7 +46,7 @@ static void convert_frame(
         frame->linesize,
         0,
         frame->height,
-       &pixels, 
+        &pixels, 
         &frame_conv->linesize
     );    
 }
@@ -157,7 +157,9 @@ void framebuffer_swap(struct FrameBuffer * fb) {
         fb->frame_needed = true;
 
         int _;
-        SDL_LockTexture(fb->next_frame, NULL, (void **)&fb->pixel_buf, &_);
+        if (SDL_LockTexture(fb->next_frame, NULL, (void **)&fb->pixel_buf, &_)) {
+            fprintf(stderr, "error locking texture: %s\n", SDL_GetError());
+        }
     }
 
     SDL_UnlockMutex(fb->mutex);

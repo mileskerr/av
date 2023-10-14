@@ -1,4 +1,4 @@
-#include "av.h"
+#include "utils.h"
 
 AVChannelLayout nb_ch_to_av_ch_layout(int n) {
     switch (n) {
@@ -27,7 +27,7 @@ enum AVSampleFormat sample_fmt_sdl_to_av(int sdl_fmt) {
 }
 
 
-static int get_texture_pitch(SDL_Texture * texture) {
+int get_texture_pitch(SDL_Texture * texture) {
     int w;
 
     uint32_t format;
