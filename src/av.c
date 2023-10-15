@@ -20,6 +20,7 @@ bool quit = false;
 enum EventType {
     EVENT_NONE,
     EVENT_PAUSE,
+    EVENT_SEEK_REL,
     EVENT_SEEK,
     EVENT_RESIZE,
     EVENT_QUIT
@@ -29,6 +30,7 @@ struct Event {
     uint32_t type;
     union {
         double seconds;
+        double position;
         struct {
             int w, h;
         };
@@ -92,16 +94,15 @@ struct Event poll_events(struct EventQueue * eventq) {
 }
 
 
-static uint64_t handle_event(
+
+static void handle_sdl_event(
     SDL_Event * sdl_event,
     struct EventQueue * eventq,
-    struct Layout * layout
+    struct Layout * layout,
+    const uint8_t * keys,
+    int mouse_x, int mouse_y
 ) {
-    int nkeys;
-    const uint8_t * keys = SDL_GetKeyboardState(&nkeys);
 
-    int mouse_x, mouse_y;
-    SDL_GetMouseState(&mouse_x, &mouse_y);
 
     switch (sdl_event->type) {
         case SDL_MOUSEWHEEL:
@@ -109,11 +110,11 @@ static uint64_t handle_event(
 
                 if (keys[SDL_SCANCODE_LSHIFT])
                     queue_event(
-                        eventq, (struct Event){ EVENT_SEEK, .seconds = sdl_event->wheel.y * 2.0 }
+                        eventq, (struct Event){ EVENT_SEEK_REL, .seconds = sdl_event->wheel.y * 2.0 }
                     );
                 else
                     queue_event(
-                        eventq, (struct Event){ EVENT_SEEK, .seconds = sdl_event->wheel.y * 0.5 }
+                        eventq, (struct Event){ EVENT_SEEK_REL, .seconds = sdl_event->wheel.y * 0.5 }
                     );
             }
             break;
@@ -143,7 +144,47 @@ static uint64_t handle_event(
             }
             break;
     }
-    return 0;
+}
+
+static void handle_input(
+    struct EventQueue * eventq,
+    struct Layout * layout
+) {
+    static bool dragging_progress_bar = false;
+
+    SDL_PumpEvents();
+
+
+    int mouse_x, mouse_y;
+    uint32_t mouse = SDL_GetMouseState(&mouse_x, &mouse_y);
+
+    int nkeys;
+    const uint8_t * keys = SDL_GetKeyboardState(&nkeys);
+
+    SDL_Event * sdl_event = &(SDL_Event){};
+    while (SDL_PollEvent(sdl_event)) {
+        handle_sdl_event(sdl_event, eventq, layout, keys, mouse_x, mouse_y);
+    }
+    
+    if (
+        (mouse & SDL_BUTTON(1)) &&
+        (SDL_PointInRect(&(SDL_Point){ mouse_x, mouse_y }, &layout->progress_rect))
+    )
+        dragging_progress_bar = true;
+
+    if (!(mouse & SDL_BUTTON(1))) dragging_progress_bar = false;
+
+    if (dragging_progress_bar) {
+        double mouse_rel = mouse_x - layout->progress_rect.x;
+        double position = mouse_rel / layout->progress_rect.w;
+        queue_event(eventq, (struct Event){ EVENT_SEEK, .position = position });
+    }
+
+    
+
+
+    
+    
 }
 
 static TTF_Font * default_font(int size) {
@@ -213,11 +254,6 @@ int main(int argc, char * argv[]) {
     double next_frame_ts = ts;
     double min_frame_time = 1.0/144.0;
 
-    AVRational clocks_per_time_base =
-        av_mul_q(pb_ctx->time_base, (AVRational){ CLOCKS_PER_SEC, 1 });
-    AVRational time_base = pb_ctx->time_base;
-
-
     bool paused = true;
 
     struct EventQueue eventq = create_event_queue();
@@ -235,11 +271,8 @@ int main(int argc, char * argv[]) {
         #define SECS(TIME_BASE) av_q2d(av_mul_q((AVRational) { (TIME_BASE), 1 }, pb_ctx->time_base))
         #define TIME_BASE(SECS) av_q2d(av_div_q( av_d2q(SECS, 0xffff), pb_ctx->time_base))
 
-        SDL_PumpEvents();
-        SDL_Event * sdl_event = &(SDL_Event){};
-        while (SDL_PollEvent(sdl_event)) {
-            handle_event(sdl_event, &eventq, &layout);
-        }
+        handle_input(&eventq, &layout);
+
 
         struct Event event = poll_events(&eventq);
         switch (event.type) {
@@ -262,11 +295,16 @@ int main(int argc, char * argv[]) {
                 break;
 
             case EVENT_SEEK:
+                ts = event.position * pb_ctx->duration;
+                goto seek_to_ts;
+
+            case EVENT_SEEK_REL:
                 ts = ts + TIME_BASE(event.seconds);
+
+                seek_to_ts:
                 ts = next_frame_ts =
                     MIN(MAX(ts, pb_ctx->start_time), pb_ctx->duration);
                 seek(pb_ctx, ts);
-                framebuffer_swap(&framebuffer, true);
                 framebuffer_swap(&framebuffer, true);
                 redraw_video = true;
                 break;
