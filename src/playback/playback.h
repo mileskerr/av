@@ -13,11 +13,9 @@
  * should lock mutex the whole time it is decoding, and main thread should lock
  * it only while swapping the frames */
 struct FrameBuffer {
-    int duration, next_duration;
     SDL_Texture * frame, * next_frame;
-    uint8_t * pixel_buf;
-    bool frame_needed;
-    SDL_mutex * mutex;
+    int64_t pts, duration;
+    bool rendering;
 };
 
 void destroy_framebuffer(struct FrameBuffer * fb);
@@ -26,10 +24,6 @@ struct FrameBuffer create_framebuffer(
     SDL_Renderer * renderer, SDL_PixelFormatEnum pixel_format,
     uint32_t width, uint32_t height
 );
-
-/* swaps the buffers and signals that a new frame should be aquired.
- * fb->current_frame is ok to use until this function is called again on fb. */
-int framebuffer_swap(struct FrameBuffer * fb, bool wait);
 
 struct InternalData;
 
@@ -44,9 +38,13 @@ struct PlaybackCtx {
 
 void seek(struct PlaybackCtx * pb_ctx, int ts);
 
+void advance_frame(struct PlaybackCtx * pb_ctx);
+
+SDL_Texture * get_frame(struct PlaybackCtx * pb_ctx, int64_t * pts, int64_t * duration);
+
 struct PlaybackCtx * open_for_playback(char * filename);
 
-void playback_to_framebuffer(struct PlaybackCtx * pb_ctx, struct FrameBuffer * fb);
+void playback_to_renderer(struct PlaybackCtx * pb_ctx, SDL_Renderer * renderer);
 
 void destroy_playback_ctx(struct PlaybackCtx * pb_ctx);
 

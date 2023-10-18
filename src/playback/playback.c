@@ -5,6 +5,29 @@
 extern bool quit;
 
 
+struct FrameBuffer create_framebuffer(
+    SDL_Renderer * renderer, SDL_PixelFormatEnum pixel_format,
+    uint32_t width, uint32_t height
+) {
+    struct FrameBuffer ret = {};
+    ret.frame = SDL_CreateTexture(
+        renderer, pixel_format, SDL_TEXTUREACCESS_STREAMING,
+        width, height
+    );
+    ret.next_frame = SDL_CreateTexture(
+        renderer, pixel_format, SDL_TEXTUREACCESS_STREAMING,
+        width, height
+    );
+    ret.rendering = false;
+
+    return ret;
+}
+
+void destroy_framebuffer(struct FrameBuffer * fb) {
+    SDL_DestroyTexture(fb->frame);
+    SDL_DestroyTexture(fb->next_frame);
+}
+
 struct InternalData {
     SDL_Thread * demuxer, * vdecoder, * adecoder;
     AVFormatContext * format_ctx;
@@ -12,6 +35,7 @@ struct InternalData {
     int astream_idx, vstream_idx;
     struct PacketQueue demuxed_vpktq, demuxed_apktq, decoded_pktq;
     struct MessageQueue msgq_in, msgq_out_demux, msgq_out_vdec, msgq_out_adec;
+    struct FrameBuffer framebuffer;
 };
 
 static AVCodecContext * open_codec_context(AVFormatContext * format_ctx, int stream_idx) {
@@ -97,8 +121,12 @@ struct PlaybackCtx * open_for_playback(char * filename) {
     return ret;
 }
 
-void playback_to_framebuffer(struct PlaybackCtx * pb_ctx, struct FrameBuffer * fb) {
+void playback_to_renderer(struct PlaybackCtx * pb_ctx, SDL_Renderer * renderer) {
     struct InternalData * id = pb_ctx->internal_data;
+
+    id->framebuffer = create_framebuffer(
+        renderer, SDL_PIXELFORMAT_RGB24, id->vcodec_ctx->width, id->vcodec_ctx->height
+    );
 
 
     id->demuxed_apktq = create_packet_queue();
@@ -132,41 +160,80 @@ void playback_to_framebuffer(struct PlaybackCtx * pb_ctx, struct FrameBuffer * f
             &id->decoded_pktq,
             &id->msgq_out_vdec,
             &id->msgq_in,
-            fb,
         }
     );
     extern int threads_initialized;
     while (threads_initialized < 2);
 }
 
+
+static void finish_rendering(struct PlaybackCtx * pb_ctx) {
+    struct InternalData * id = pb_ctx->internal_data;
+    if (id->framebuffer.rendering) {
+
+        //TODO: fix this so it doesnt eat messages
+        struct Message msg;
+        while ((msg = msgq_receive(&id->msgq_in)).type != MSG_FRAME_READY) usleep(10);
+
+        id->framebuffer.pts = msg.got_frame.pts;
+        id->framebuffer.pts = msg.got_frame.duration;
+
+        SDL_UnlockTexture(id->framebuffer.next_frame);
+
+        SDL_Texture * tmp = id->framebuffer.frame;
+        id->framebuffer.frame = id->framebuffer.next_frame;
+        id->framebuffer.next_frame = tmp;        
+
+        id->framebuffer.rendering = false;
+    }
+}
+
+SDL_Texture * get_frame(struct PlaybackCtx * pb_ctx, int64_t * pts, int64_t * duration) {
+    struct InternalData * id = pb_ctx->internal_data;
+    *pts = id->framebuffer.pts;
+    *duration = id->framebuffer.duration;
+    return id->framebuffer.frame;
+}
+
+void advance_frame(struct PlaybackCtx * pb_ctx) {
+    struct InternalData * id = pb_ctx->internal_data;
+    finish_rendering(pb_ctx);
+
+    int pitch;
+    uint8_t * pixels;
+    SDL_LockTexture(id->framebuffer.next_frame, NULL, (void **)&pixels, &pitch);
+
+    msgq_send(&id->msgq_out_vdec, 
+        (struct Message) {
+            MSG_GET_NEXT_FRAME, 
+            .needed_frame = {.pixels = pixels }
+        }
+    );
+    id->framebuffer.rendering = true;
+}
+
 void seek(struct PlaybackCtx * pb_ctx, int ts) {
     struct InternalData * id = pb_ctx->internal_data;
+    finish_rendering(pb_ctx);
 
-    uint32_t * content = malloc(8);
-
-    content[0] = SEEK;
-    content[1] = ts;
-
-    msgq_send(&id->msgq_out_demux, content);
+    int pitch;
+    uint8_t * pixels;
+    SDL_LockTexture(id->framebuffer.next_frame, NULL, (void **)&pixels, &pitch);
+    msgq_send(&id->msgq_out_demux, 
+        (struct Message) {
+            MSG_SEEK,
+            .needed_frame = { .timestamp = ts } 
+        }
+    );
+    msgq_send(&id->msgq_out_vdec, 
+        (struct Message) {
+            MSG_SEEK,
+            .needed_frame = { .timestamp = ts, .pixels = pixels } 
+        }
+    );
+    id->framebuffer.rendering = true;
 }
 
-/*void play_pause(struct PlaybackCtx * pb_ctx) {
-    struct InternalData * id = pb_ctx->internal_data;
-
-    uint32_t * content = malloc(4);
-
-    if (pb_ctx->paused)
-        *content = PLAY;
-    else *content = PAUSE;
-
-        
-
-    msgq_send(&id->msgq_out_vdec, content);
-
-    pb_ctx->paused = !pb_ctx->paused;
-
-}
-*/
 void destroy_playback_ctx(struct PlaybackCtx * pb_ctx) {
     struct InternalData * id = pb_ctx->internal_data;
     SDL_WaitThread(id->vdecoder, NULL);

@@ -2,7 +2,7 @@ CC := gcc
 DEBUGFLAGS := -g -O0 
 #-fsanitize=address
 RELEASEFLAGS := -O3
-CFLAGS := -Wall $(DEBUGFLAGS)
+CFLAGS := -Wall -Wextra $(DEBUGFLAGS)
 LDFLAGS := -lSDL2 -lSDL2_ttf -lm -lavformat -lavcodec -lswscale -lavutil -lswresample -lz
 APP_NAME := av
 

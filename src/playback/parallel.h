@@ -23,32 +23,40 @@ struct PacketQueue create_packet_queue(void);
 void destroy_packet_queue(struct PacketQueue * pktq);
 void pktq_fill(struct PacketQueue * pktq);
 struct MessageQueue create_message_queue(void);
-void msgq_receive(struct MessageQueue * msgq, void ** content);
-void msgq_send(struct MessageQueue * msgq, void * content);
+struct Message msgq_receive(struct MessageQueue * msgq);
+void msgq_send(struct MessageQueue * msgq, struct Message msg);
 
-enum MsgCode {
-/*  PLAY = true,
-    PAUSE = false, */
-
-    /* from main thread */
-    SEEK,
-    NEXT_FRAME,
-    PREV_FRAME,
-
-    /* to main thread */
-    TS_CHANGED,
+enum MessageType {
+    MSG_NONE,
+    MSG_FRAME_READY,
+    MSG_GET_NEXT_FRAME,
+    MSG_SEEK,
 };
 
 struct MessageQueue {
     int count;
     SDL_mutex * mutex;
-    struct Message * first;
-    struct Message * last;
+    struct QueuedMessage * first;
+    struct QueuedMessage * last;
 };
 
 struct Message {
-    void * content;
-    struct Message * next;
+    uint64_t type;
+    union {
+        struct {
+            int64_t pts;
+            int64_t duration;
+        } got_frame;
+        struct {
+            uint8_t * pixels;
+            int64_t timestamp;
+        } needed_frame;
+    };
+};
+
+struct QueuedMessage {
+    struct Message msg;
+    struct QueuedMessage * next;
 };
 
 struct DemuxInfo {
@@ -76,7 +84,6 @@ struct VideoInfo {
     struct PacketQueue * decoded_pktq;
     struct MessageQueue * msgq_in;
     struct MessageQueue * msgq_out;
-    struct FrameBuffer * fb;
 };
 int video_thread(void *);
 

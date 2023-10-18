@@ -27,10 +27,6 @@ enum AVSampleFormat sample_fmt_sdl_to_av(int sdl_fmt) {
 }
 
 
-int get_texture_pitch(SDL_Texture * texture) {
-    int w;
-
-    uint32_t format;
-    SDL_QueryTexture(texture, &format, NULL, &w, NULL);
+int get_texture_pitch(uint32_t format, int w) {
     return (w * SDL_BYTESPERPIXEL(format) + 3) & ~3;
 }

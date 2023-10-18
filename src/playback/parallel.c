@@ -85,21 +85,21 @@ struct MessageQueue create_message_queue(void) {
     };
 }
 
-void msgq_send(struct MessageQueue * msgq, void * content) {
+void msgq_send(struct MessageQueue * msgq, struct Message msg) {
     SDL_LockMutex(msgq->mutex);
 
-    struct Message * msg = malloc(sizeof(struct Message));
+    struct QueuedMessage * qd_msg = malloc(sizeof(struct QueuedMessage));
 
-    *msg = (struct Message) {
-        .content = content,
+    *qd_msg = (struct QueuedMessage) {
+        .msg = msg,
         .next = NULL
     };
 
     if (msgq->last) {
-        msgq->last->next = msg;
-        msgq->last = msg;
+        msgq->last->next = qd_msg;
+        msgq->last = qd_msg;
     } else {
-        msgq->first = msgq->last = msg;
+        msgq->first = msgq->last = qd_msg;
     }
 
     msgq->count++;
@@ -107,15 +107,13 @@ void msgq_send(struct MessageQueue * msgq, void * content) {
     SDL_UnlockMutex(msgq->mutex);    
 }
 
-/* get the first message in the queue and store it in content, if there
- * is one. Otherwise, set content to NULL. caller is responsible for freeing
- * content */
-void msgq_receive(struct MessageQueue * msgq, void ** content) {
+struct Message msgq_receive(struct MessageQueue * msgq) {
+    struct Message ret = { MSG_NONE };
     SDL_LockMutex(msgq->mutex);
 
     if (msgq->count) {
-        struct Message * got_msg = msgq->first;
-        *content = got_msg->content;
+        struct QueuedMessage * got_msg = msgq->first;
+        ret = got_msg->msg;
         if (msgq->last == msgq->first) {
             msgq->last = msgq->first = NULL;
         } else {
@@ -123,11 +121,10 @@ void msgq_receive(struct MessageQueue * msgq, void ** content) {
         }
         free(got_msg);
         msgq->count--;
-    } else {
-        *content = NULL;
     }
 
     SDL_UnlockMutex(msgq->mutex);
+    return ret;
 }
 
 struct PacketQueue create_packet_queue(void) {
@@ -194,76 +191,6 @@ void pktq_fill(struct PacketQueue * pktq) {
     }
 }
 
-struct FrameBuffer create_framebuffer(
-    SDL_Renderer * renderer, SDL_PixelFormatEnum pixel_format,
-    uint32_t width, uint32_t height
-) {
-    struct FrameBuffer ret = {};
-    ret.frame = SDL_CreateTexture(
-        renderer, pixel_format, SDL_TEXTUREACCESS_STREAMING,
-        width, height
-    );
-    ret.next_frame = SDL_CreateTexture(
-        renderer, pixel_format, SDL_TEXTUREACCESS_STREAMING,
-        width, height
-    );
-    ret.mutex = SDL_CreateMutex();
-
-    return ret;
-}
-
-void destroy_framebuffer(struct FrameBuffer * fb) {
-    SDL_DestroyTexture(fb->frame);
-    SDL_DestroyTexture(fb->next_frame);
-    SDL_DestroyMutex(fb->mutex);
-}
-
-int framebuffer_swap(struct FrameBuffer * fb, bool wait) {
-    if (wait) {
-        SDL_LockMutex(fb->mutex);
-    } else {
-        if (SDL_TryLockMutex(fb->mutex)) return 1;
-    }
-
-    if (fb->frame_needed); /* we haven't even started decoding this frame yet. lets not get ahead of ourselves */
-    else {
-        SDL_UnlockTexture(fb->next_frame);
-
-        SDL_Texture * new_frame = fb->next_frame;
-        fb->next_frame = fb->frame;
-        fb->frame = new_frame;
-        fb->duration = fb->next_duration;
-        fb->frame_needed = true;
-
-        int _;
-        if (SDL_LockTexture(fb->next_frame, NULL, (void **)&fb->pixel_buf, &_)) {
-            fprintf(stderr, "error locking texture: %s\n", SDL_GetError());
-        }
-    }
-
-    SDL_UnlockMutex(fb->mutex);
-    return 0;
-}
-
-void wait_for_frame_needed(struct FrameBuffer * fb) {
-    while (!quit) {
-        SDL_LockMutex(fb->mutex);
-
-        if (fb->frame_needed) {
-            break;
-        }
-
-        SDL_UnlockMutex(fb->mutex);
-        usleep(80); /* wait for about a tenth of a screen refresh */
-    }
-}
-
-void frame_ready(struct FrameBuffer * fb) {
-    fb->frame_needed = false;
-    SDL_UnlockMutex(fb->mutex);
-}
-
-#define DONT_DISPLAY 1
 
 int demuxing_thread(void * data) {
     struct DemuxInfo * info = data;
@@ -283,19 +210,14 @@ int demuxing_thread(void * data) {
     int start_time = format_ctx->streams[vstream_idx]->start_time;
     int seek_time = start_time - 1;
 
-    bool seeking = false;
     int last_ts = start_time;
 
     while (!quit) {
-
-        msgq_receive(msgq_in, (void**)&msg);
-
-        if (!msg) goto nomsg;
-
-        switch (*msg) {
-            case SEEK: {
-                seek_time = msg[1];
-                seeking = true;
+        struct Message msg = msgq_receive(msgq_in);
+        switch (msg.type) {
+            case MSG_NONE: break;
+            case MSG_SEEK: {
+                seek_time = msg.needed_frame.timestamp;
 
                 if (avformat_seek_file(
                     format_ctx, vstream_idx,
@@ -307,8 +229,6 @@ int demuxing_thread(void * data) {
                 pktq_drain(demuxed_vpktq, decoded_pktq);
             }
         }
-
-        nomsg:;
         
         AVPacket * pkt = dequeue_pkt(decoded_pktq);
 
@@ -320,17 +240,6 @@ int demuxing_thread(void * data) {
             fprintf(stderr, "%s", av_err2str(ret));
             queue_pkt(decoded_pktq, pkt);
         } else if (pkt->stream_index == vstream_idx) {
-            pkt->opaque = (void *)0;
-            if (pkt->dts < seek_time) {
-                pkt->opaque = (void *)DONT_DISPLAY;
-            } else if (seeking) {
-                seeking = false;
-                uint32_t * content = malloc(8);
-                content[0] = TS_CHANGED;
-                content[1] = last_ts;
-                msgq_send(msgq_out, content);
-            }
-            last_ts = pkt->dts;
             queue_pkt(demuxed_vpktq, pkt);
         } else
             queue_pkt(decoded_pktq, pkt);
@@ -338,7 +247,6 @@ int demuxing_thread(void * data) {
     return 0;
 }
 
-/* this should probably be rewritten as a callback to avoid the double queueing */
 int audio_thread(void * data) {
     struct AudioInfo * info = data;
     AVCodecContext * codec_ctx = info->codec_ctx;
@@ -427,40 +335,44 @@ int video_thread(void * data) {
     struct VideoInfo * info = data;
     AVCodecContext * codec_ctx = info->codec_ctx;
     struct MessageQueue * msgq_in = info->msgq_in;
+    struct MessageQueue * msgq_out = info->msgq_out;
     struct PacketQueue * demuxed_pktq = info->demuxed_pktq;
     struct PacketQueue * decoded_pktq = info->decoded_pktq;
-    struct FrameBuffer * fb = info->fb;
 
     threads_initialized += 1;
 
     AVFrame * frame = av_frame_alloc();
 
     struct VFrameConverter frame_conv = make_frame_converter(
-        codec_ctx, AV_PIX_FMT_RGB24, get_texture_pitch(fb->frame)
+        codec_ctx, AV_PIX_FMT_RGB24, get_texture_pitch(AV_PIX_FMT_RGB24, codec_ctx->width)
     );
 
-    uint32_t * msg;
-
     while (!quit) {
-        //msgq_receive(msgq, (void**)&msg);
+        AVPacket * pkt;
+        struct Message msg = msgq_receive(msgq_in);
 
-        AVPacket * pkt = dequeue_pkt(demuxed_pktq);
+        switch (msg.type) {
+            case MSG_NONE: usleep(10); break;
+            decode_frame: case MSG_SEEK: case MSG_GET_NEXT_FRAME:
+                pkt = dequeue_pkt(demuxed_pktq);
+                decode_frame(codec_ctx, pkt, frame);
+                queue_pkt(decoded_pktq, pkt);
 
-        bool display = !((uint64_t)pkt->opaque == DONT_DISPLAY);
+                int64_t nts = msg.needed_frame.timestamp;
+                if (msg.type == MSG_SEEK) if ((nts < pkt->pts) || (pkt->pts + pkt->duration < nts))
+                    goto decode_frame;
 
+                convert_frame(&frame_conv, frame, msg.needed_frame.pixels);
 
-        int error;
-        if ((error = decode_frame(codec_ctx, pkt, frame)))
-            fprintf(stderr, "%s\n", av_err2str(error));
-
-        if (display && !error) {
-            wait_for_frame_needed(fb);
-            convert_frame(&frame_conv, frame, fb->pixel_buf);
-            fb->next_duration = pkt->duration;
-            frame_ready(fb);
+                msgq_send(msgq_out, (struct Message){
+                    MSG_FRAME_READY, 
+                    .got_frame = { 
+                        .pts = pkt->pts, 
+                        .duration = pkt->duration 
+                    }
+                });
+                break;
         }
-
-        queue_pkt(decoded_pktq, pkt);
     }
     return 0;
 }

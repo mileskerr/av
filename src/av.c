@@ -132,6 +132,7 @@ static void handle_sdl_event(
 
         case SDL_QUIT:
             queue_event( eventq, (struct Event){ EVENT_QUIT });
+            break;
 
         case SDL_WINDOWEVENT:
             if (sdl_event->window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
@@ -179,12 +180,6 @@ static void handle_input(
         double position = mouse_rel / layout->progress_rect.w;
         queue_event(eventq, (struct Event){ EVENT_SEEK, .position = position });
     }
-
-    
-
-
-    
-    
 }
 
 static TTF_Font * default_font(int size) {
@@ -241,14 +236,8 @@ int main(int argc, char * argv[]) {
         );
     }
 
-    struct FrameBuffer framebuffer = create_framebuffer(
-        renderer, SDL_PIXELFORMAT_RGB24,
-        pb_ctx->width, pb_ctx->height
-    );
 
-    playback_to_framebuffer(pb_ctx, &framebuffer);
-
-    framebuffer_swap(&framebuffer, true);
+    playback_to_renderer(pb_ctx, renderer);
 
     double ts = pb_ctx->start_time;
     double next_frame_ts = ts;
@@ -261,18 +250,14 @@ int main(int argc, char * argv[]) {
     while (!quit) {
         struct timespec frame_start, frame_finish;
         double elapsed;
+        SDL_Texture * video_tex;
         clock_gettime(CLOCK_MONOTONIC, &frame_start);
-        /* if the current timestamp is greater than the timestamp of the next
-         * frame, it's time to display a new frame. if we have a new frame we
-         * definitely need to redraw the video */
-        bool newframe = (ts >= next_frame_ts);
-        bool redraw_ui = !paused;
-        bool redraw_video = newframe;
         #define SECS(TIME_BASE) av_q2d(av_mul_q((AVRational) { (TIME_BASE), 1 }, pb_ctx->time_base))
         #define TIME_BASE(SECS) av_q2d(av_div_q( av_d2q(SECS, 0xffff), pb_ctx->time_base))
 
         handle_input(&eventq, &layout);
 
+        printf("jjddf: %d\n", paused);
 
         struct Event event = poll_events(&eventq);
         switch (event.type) {
@@ -291,7 +276,6 @@ int main(int argc, char * argv[]) {
                     pb_ctx->height, pb_ctx->width,
                     TIMELINE_HEIGHT, PROGRESS_HEIGHT
                 );
-                redraw_ui = true;
                 break;
 
             case EVENT_SEEK:
@@ -305,36 +289,31 @@ int main(int argc, char * argv[]) {
                 ts = next_frame_ts =
                     MIN(MAX(ts, pb_ctx->start_time), pb_ctx->duration);
                 seek(pb_ctx, ts);
-                framebuffer_swap(&framebuffer, true);
-                redraw_video = true;
                 break;
         }
 
-        if (redraw_video) {
-            draw_background(renderer, &colors);
-            SDL_RenderCopy(renderer, framebuffer.frame, NULL, &layout.viewer_rect);
-            redraw_ui = true;
+        if (!paused && (ts >= next_frame_ts)) {
+            advance_frame(pb_ctx);
         }
 
-        if (newframe) {
-            if (!framebuffer_swap(&framebuffer, false)) {
-                next_frame_ts += framebuffer.duration;
-            }
-        }
+        int64_t pts, dur;
+        video_tex = get_frame(pb_ctx, &pts, &dur);
 
-        if (redraw_ui) {
-            draw_progress(
-                renderer, layout.progress_rect, 
-                SECS(ts), SECS(pb_ctx->duration),
-                &colors
-            );
-            draw_timeline(
-                renderer, font, layout.timeline_rect,
-                SECS(pb_ctx->start_time), SECS(ts),
-                SECS(pb_ctx->duration), &colors
-            );
-            SDL_RenderPresent(renderer);
-        }
+        draw_background(renderer, &colors);
+        SDL_RenderCopy(renderer, video_tex, NULL, &layout.viewer_rect);
+
+
+        draw_progress(
+            renderer, layout.progress_rect, 
+            SECS(ts), SECS(pb_ctx->duration),
+            &colors
+        );
+        draw_timeline(
+            renderer, font, layout.timeline_rect,
+            SECS(pb_ctx->start_time), SECS(ts),
+            SECS(pb_ctx->duration), &colors
+        );
+        SDL_RenderPresent(renderer);
 
         do {
             clock_gettime(CLOCK_MONOTONIC, &frame_finish);
@@ -345,7 +324,6 @@ int main(int argc, char * argv[]) {
             ts += elapsed/av_q2d(pb_ctx->time_base);
     }
 
-    destroy_framebuffer(&framebuffer);
     destroy_playback_ctx(pb_ctx);
 
     SDL_DestroyRenderer(renderer);
