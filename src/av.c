@@ -248,6 +248,7 @@ int main(int argc, char * argv[]) {
     struct EventQueue eventq = create_event_queue();
 
     while (!quit) {
+
         struct timespec frame_start, frame_finish;
         double elapsed;
         SDL_Texture * video_tex;
@@ -257,7 +258,11 @@ int main(int argc, char * argv[]) {
 
         handle_input(&eventq, &layout);
 
-        printf("jjddf: %d\n", paused);
+
+        /* calling get_frame at last possible time before advance_frame or seek to give video thread
+         * as much time as possible to prepare the image */
+        int64_t pts, dur;
+        video_tex = get_frame(pb_ctx, &pts, &dur);
 
         struct Event event = poll_events(&eventq);
         switch (event.type) {
@@ -292,12 +297,11 @@ int main(int argc, char * argv[]) {
                 break;
         }
 
+
         if (!paused && (ts >= next_frame_ts)) {
             advance_frame(pb_ctx);
         }
 
-        int64_t pts, dur;
-        video_tex = get_frame(pb_ctx, &pts, &dur);
 
         draw_background(renderer, &colors);
         SDL_RenderCopy(renderer, video_tex, NULL, &layout.viewer_rect);
