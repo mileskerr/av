@@ -28,5 +28,6 @@ enum AVSampleFormat sample_fmt_sdl_to_av(int sdl_fmt) {
 
 
 int get_texture_pitch(uint32_t format, int w) {
+    printf("%d\n", (w * SDL_BYTESPERPIXEL(format) + 3) & ~3);
     return (w * SDL_BYTESPERPIXEL(format) + 3) & ~3;
 }

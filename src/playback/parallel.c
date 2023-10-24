@@ -152,7 +152,7 @@ static void queue_pkt(struct PacketQueue * pktq, AVPacket * pkt) {
 }
 
 static AVPacket * dequeue_pkt(struct PacketQueue * pktq) {
-    SDL_SemWait(pktq->capacity);
+    if (SDL_SemWaitTimeout(pktq->capacity, 10)) return NULL;
 
     /* mutex is not needed because only one thread will ever be getting
      * from the queue, and putting and getting simultaneously is fine */
@@ -232,17 +232,19 @@ int demuxing_thread(void * data) {
         
         AVPacket * pkt = dequeue_pkt(decoded_pktq);
 
-        av_packet_unref(pkt);
+        if (pkt) {
+            av_packet_unref(pkt);
 
-        int ret;
-        if ((ret = av_read_frame(format_ctx, pkt))) {
-            /* the packet must be recycled into the queue if we aren't decoding it */
-            fprintf(stderr, "%s", av_err2str(ret));
-            queue_pkt(decoded_pktq, pkt);
-        } else if (pkt->stream_index == vstream_idx) {
-            queue_pkt(demuxed_vpktq, pkt);
-        } else
-            queue_pkt(decoded_pktq, pkt);
+            int ret;
+            if ((ret = av_read_frame(format_ctx, pkt))) {
+                /* the packet must be recycled into the queue if we aren't decoding it */
+                fprintf(stderr, "%s", av_err2str(ret));
+                queue_pkt(decoded_pktq, pkt);
+            } else if (pkt->stream_index == vstream_idx) {
+                queue_pkt(demuxed_vpktq, pkt);
+            } else
+                queue_pkt(decoded_pktq, pkt);
+        }
     }
     return 0;
 }
@@ -344,7 +346,7 @@ int video_thread(void * data) {
     AVFrame * frame = av_frame_alloc();
 
     struct VFrameConverter frame_conv = make_frame_converter(
-        codec_ctx, AV_PIX_FMT_RGB24, get_texture_pitch(AV_PIX_FMT_RGB24, codec_ctx->width)
+        codec_ctx, AV_PIX_FMT_RGB24, get_texture_pitch(SDL_PIXELFORMAT_RGB24, codec_ctx->width)
     );
 
     while (!quit) {
@@ -367,8 +369,8 @@ int video_thread(void * data) {
                 msgq_send(msgq_out, (struct Message){
                     MSG_FRAME_READY, 
                     .got_frame = { 
-                        .pts = pkt->pts, 
-                        .duration = pkt->duration 
+                        .pts = frame->pts,
+                        .duration = frame->duration
                     }
                 });
                 break;

@@ -10,12 +10,33 @@
 
 bool quit = false;
 
+#define DBG_TIMER(NAME) \
+    static struct timespec dbg_timer_start ## NAME, dbg_timer_end ## NAME; \
+
+#define DBG_TIMER_START(NAME) \
+    clock_gettime(CLOCK_MONOTONIC, &dbg_timer_start ## NAME); \
+
+#define DBG_TIMER_END(NAME) \
+    clock_gettime(CLOCK_MONOTONIC, &(dbg_timer_end ## NAME)); \
+    printf( \
+        "%s timer: %lf\n", \
+        #NAME, \
+        (double) dbg_timer_start ## NAME.tv_sec - \
+        dbg_timer_end ## NAME.tv_sec + \
+        (dbg_timer_end ## NAME.tv_nsec - dbg_timer_start ## NAME.tv_nsec) / \
+        1000000000.0 \
+    ); \
+
 
 #define SDL_AUDIO_FMT AUDIO_S16SYS
 #define SDL_AUDIO_SAMPLES 1024
 
 #define TIMELINE_HEIGHT 38
 #define PROGRESS_HEIGHT 20
+
+double t2sec(struct timespec spec) {
+    return spec.tv_sec + spec.tv_nsec / 1000000000.0;
+}
 
 enum EventType {
     EVENT_NONE,
@@ -122,16 +143,16 @@ static void handle_sdl_event(
         case SDL_KEYDOWN:
             switch (sdl_event->key.keysym.sym) {
                 case SDLK_SPACE:
-                    queue_event( eventq, (struct Event){ EVENT_PAUSE });
+                    queue_event( eventq, (struct Event){ .type = EVENT_PAUSE });
                     break;
                 case SDLK_ESCAPE:
-                    queue_event( eventq, (struct Event){ EVENT_QUIT });
+                    queue_event( eventq, (struct Event){ .type = EVENT_QUIT });
                     break;
             }
             break;
 
         case SDL_QUIT:
-            queue_event( eventq, (struct Event){ EVENT_QUIT });
+            queue_event( eventq, (struct Event){ .type = EVENT_QUIT });
             break;
 
         case SDL_WINDOWEVENT:
@@ -239,13 +260,14 @@ int main(int argc, char * argv[]) {
 
     playback_to_renderer(pb_ctx, renderer);
 
-    double ts = pb_ctx->start_time;
-    double next_frame_ts = ts;
+    int64_t ts = pb_ctx->start_time;
+    int64_t next_frame_ts = ts;
     double min_frame_time = 1.0/144.0;
 
     bool paused = true;
 
     struct EventQueue eventq = create_event_queue();
+    
 
     while (!quit) {
 
@@ -257,12 +279,6 @@ int main(int argc, char * argv[]) {
         #define TIME_BASE(SECS) av_q2d(av_div_q( av_d2q(SECS, 0xffff), pb_ctx->time_base))
 
         handle_input(&eventq, &layout);
-
-
-        /* calling get_frame at last possible time before advance_frame or seek to give video thread
-         * as much time as possible to prepare the image */
-        int64_t pts, dur;
-        video_tex = get_frame(pb_ctx, &pts, &dur);
 
         struct Event event = poll_events(&eventq);
         switch (event.type) {
@@ -296,16 +312,14 @@ int main(int argc, char * argv[]) {
                 seek(pb_ctx, ts);
                 break;
         }
-
-
-        if (!paused && (ts >= next_frame_ts)) {
+        int64_t pts, dur;
+        if (ts >= next_frame_ts) {
+            video_tex = get_frame(pb_ctx, &pts, &dur);
+            next_frame_ts = pts + dur;
+            draw_background(renderer, &colors);
+            SDL_RenderCopy(renderer, video_tex, NULL, &layout.viewer_rect);
             advance_frame(pb_ctx);
         }
-
-
-        draw_background(renderer, &colors);
-        SDL_RenderCopy(renderer, video_tex, NULL, &layout.viewer_rect);
-
 
         draw_progress(
             renderer, layout.progress_rect, 
@@ -324,8 +338,9 @@ int main(int argc, char * argv[]) {
             elapsed = frame_finish.tv_sec - frame_start.tv_sec + (frame_finish.tv_nsec - frame_start.tv_nsec) / 1000000000.0;
         } while (elapsed < min_frame_time);
 
-        if (!paused)
+        if (!paused) {
             ts += elapsed/av_q2d(pb_ctx->time_base);
+        }
     }
 
     destroy_playback_ctx(pb_ctx);

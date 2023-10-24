@@ -1,6 +1,7 @@
 #include "playback.h"
 #include "parallel.h"
 #include <libavformat/avformat.h>
+#include <time.h>
 
 extern bool quit;
 
@@ -173,10 +174,16 @@ static void finish_rendering(struct PlaybackCtx * pb_ctx) {
 
         //TODO: fix this so it doesnt eat messages
         struct Message msg;
-        while ((msg = msgq_receive(&id->msgq_in)).type != MSG_FRAME_READY) usleep(10);
+        
+        int wait = 0;
+        while ((msg = msgq_receive(&id->msgq_in)).type != MSG_FRAME_READY) {
+            wait++;
+            usleep(10); }
+
+        //printf("waited %d times\n", wait);
 
         id->framebuffer.pts = msg.got_frame.pts;
-        id->framebuffer.pts = msg.got_frame.duration;
+        id->framebuffer.duration = msg.got_frame.duration;
 
         SDL_UnlockTexture(id->framebuffer.next_frame);
 
@@ -188,7 +195,9 @@ static void finish_rendering(struct PlaybackCtx * pb_ctx) {
     }
 }
 
+
 SDL_Texture * get_frame(struct PlaybackCtx * pb_ctx, int64_t * pts, int64_t * duration) {
+
     struct InternalData * id = pb_ctx->internal_data;
     *pts = id->framebuffer.pts;
     *duration = id->framebuffer.duration;
