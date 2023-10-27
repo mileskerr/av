@@ -175,12 +175,13 @@ static void finish_rendering(struct PlaybackCtx * pb_ctx) {
         //TODO: fix this so it doesnt eat messages
         struct Message msg;
         
-        int wait = 0;
-        while ((msg = msgq_receive(&id->msgq_in)).type != MSG_FRAME_READY) {
-            wait++;
-            usleep(10); }
+        while (
+            !(
+                ((msg = msgq_receive(&id->msgq_in)).type == MSG_FRAME_READY) &&
+                (msgq_peek(&id->msgq_in).type != MSG_FRAME_READY)
+             )
+        ) usleep(10);
 
-        //printf("waited %d times\n", wait);
 
         id->framebuffer.pts = msg.got_frame.pts;
         id->framebuffer.duration = msg.got_frame.duration;
@@ -199,8 +200,8 @@ static void finish_rendering(struct PlaybackCtx * pb_ctx) {
 SDL_Texture * get_frame(struct PlaybackCtx * pb_ctx, int64_t * pts, int64_t * duration) {
 
     struct InternalData * id = pb_ctx->internal_data;
-    *pts = id->framebuffer.pts;
-    *duration = id->framebuffer.duration;
+    if (pts) *pts = id->framebuffer.pts;
+    if (duration) *duration = id->framebuffer.duration;
     return id->framebuffer.frame;
 }
 
@@ -212,7 +213,8 @@ void advance_frame(struct PlaybackCtx * pb_ctx) {
     uint8_t * pixels;
     SDL_LockTexture(id->framebuffer.next_frame, NULL, (void **)&pixels, &pitch);
 
-    msgq_send(&id->msgq_out_vdec, 
+    msgq_send(
+        &id->msgq_out_vdec, 
         (struct Message) {
             MSG_GET_NEXT_FRAME, 
             .needed_frame = {.pixels = pixels }
@@ -225,21 +227,29 @@ void seek(struct PlaybackCtx * pb_ctx, int ts) {
     struct InternalData * id = pb_ctx->internal_data;
     finish_rendering(pb_ctx);
 
+    printf("in: "); msgq_print(&id->msgq_in);
+    while(msgq_receive(&id->msgq_in).type != MSG_NONE) 
+        usleep(10);
+
+
     int pitch;
     uint8_t * pixels;
     SDL_LockTexture(id->framebuffer.next_frame, NULL, (void **)&pixels, &pitch);
-    msgq_send(&id->msgq_out_demux, 
+    msgq_send(
+        &id->msgq_out_demux, 
         (struct Message) {
             MSG_SEEK,
             .needed_frame = { .timestamp = ts } 
         }
     );
-    msgq_send(&id->msgq_out_vdec, 
+    msgq_send(
+        &id->msgq_out_vdec, 
         (struct Message) {
             MSG_SEEK,
             .needed_frame = { .timestamp = ts, .pixels = pixels } 
         }
     );
+    printf("out: "); msgq_print(&id->msgq_out_vdec);
     id->framebuffer.rendering = true;
 }
 

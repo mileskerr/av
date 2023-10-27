@@ -85,6 +85,27 @@ struct MessageQueue create_message_queue(void) {
     };
 }
 
+void msgq_print(struct MessageQueue * msgq) {
+    SDL_LockMutex(msgq->mutex);
+
+    struct QueuedMessage * next = msgq->first;
+    printf("(MessageQueue) [ ");
+
+    while (next) {
+        printf("%ld", next->msg.type);
+        next = next->next;
+        if (next) printf(", "); else printf(" ");
+    }
+
+    printf("]\n");
+    SDL_UnlockMutex(msgq->mutex);
+}
+
+struct Message msgq_peek(struct MessageQueue * msgq) {
+    if (msgq->first) return msgq->first->msg;
+    else return (struct Message) { .type = MSG_NONE };
+}
+
 void msgq_send(struct MessageQueue * msgq, struct Message msg) {
     SDL_LockMutex(msgq->mutex);
 
@@ -210,7 +231,6 @@ int demuxing_thread(void * data) {
     int start_time = format_ctx->streams[vstream_idx]->start_time;
     int seek_time = start_time - 1;
 
-    int last_ts = start_time;
 
     while (!quit) {
         struct Message msg = msgq_receive(msgq_in);
@@ -361,8 +381,9 @@ int video_thread(void * data) {
                 queue_pkt(decoded_pktq, pkt);
 
                 int64_t nts = msg.needed_frame.timestamp;
-                if (msg.type == MSG_SEEK) if ((nts < pkt->pts) || (pkt->pts + pkt->duration < nts))
+                if (msg.type == MSG_SEEK) if ((nts < frame->pts) || (frame->pts + frame->duration < nts))
                     goto decode_frame;
+                printf("nts: %ld, pts: %ld, pts+dur: %ld\n", nts, frame->pts, frame->pts + frame->duration);
 
                 convert_frame(&frame_conv, frame, msg.needed_frame.pixels);
 

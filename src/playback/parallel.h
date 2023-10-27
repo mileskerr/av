@@ -22,9 +22,6 @@ struct PacketQueue {
 struct PacketQueue create_packet_queue(void);
 void destroy_packet_queue(struct PacketQueue * pktq);
 void pktq_fill(struct PacketQueue * pktq);
-struct MessageQueue create_message_queue(void);
-struct Message msgq_receive(struct MessageQueue * msgq);
-void msgq_send(struct MessageQueue * msgq, struct Message msg);
 
 enum MessageType {
     MSG_NONE,
@@ -39,6 +36,12 @@ struct MessageQueue {
     struct QueuedMessage * first;
     struct QueuedMessage * last;
 };
+
+struct MessageQueue create_message_queue(void);
+struct Message msgq_receive(struct MessageQueue * msgq);
+void msgq_send(struct MessageQueue * msgq, struct Message msg);
+struct Message msgq_peek(struct MessageQueue * msgq);
+void msgq_print(struct MessageQueue * msgq);
 
 struct Message {
     uint64_t type;

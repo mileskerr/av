@@ -43,6 +43,8 @@ enum EventType {
     EVENT_PAUSE,
     EVENT_SEEK_REL,
     EVENT_SEEK,
+    EVENT_NEXT_FRAME,
+    EVENT_PREV_FRAME,
     EVENT_RESIZE,
     EVENT_QUIT
 };
@@ -132,6 +134,10 @@ static void handle_sdl_event(
                 if (keys[SDL_SCANCODE_LSHIFT])
                     queue_event(
                         eventq, (struct Event){ EVENT_SEEK_REL, .seconds = sdl_event->wheel.y * 2.0 }
+                    );
+                else if (keys[SDL_SCANCODE_LCTRL])
+                    queue_event(
+                        eventq, (struct Event){ .type = sdl_event->wheel.y > 0 ? EVENT_NEXT_FRAME : EVENT_PREV_FRAME }
                     );
                 else
                     queue_event(
@@ -261,7 +267,8 @@ int main(int argc, char * argv[]) {
     playback_to_renderer(pb_ctx, renderer);
 
     int64_t ts = pb_ctx->start_time;
-    int64_t next_frame_ts = ts;
+    int64_t next_pts = ts;
+    int64_t pts, dur;
     double min_frame_time = 1.0/144.0;
 
     bool paused = true;
@@ -298,6 +305,10 @@ int main(int argc, char * argv[]) {
                     TIMELINE_HEIGHT, PROGRESS_HEIGHT
                 );
                 break;
+            case EVENT_PREV_FRAME:
+                ts = pts;
+                printf("pts0: %ld\n", pts);
+                goto seek_to_ts;
 
             case EVENT_SEEK:
                 ts = event.position * pb_ctx->duration;
@@ -307,15 +318,16 @@ int main(int argc, char * argv[]) {
                 ts = ts + TIME_BASE(event.seconds);
 
                 seek_to_ts:
-                ts = next_frame_ts =
+                ts = next_pts =
                     MIN(MAX(ts, pb_ctx->start_time), pb_ctx->duration);
                 seek(pb_ctx, ts);
                 break;
         }
-        int64_t pts, dur;
-        if (ts >= next_frame_ts) {
+
+        if (ts >= next_pts) {
             video_tex = get_frame(pb_ctx, &pts, &dur);
-            next_frame_ts = pts + dur;
+            printf("pts: %ld\n", pts);
+            next_pts = pts + dur;
             draw_background(renderer, &colors);
             SDL_RenderCopy(renderer, video_tex, NULL, &layout.viewer_rect);
             advance_frame(pb_ctx);
