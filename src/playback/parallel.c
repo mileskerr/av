@@ -156,7 +156,7 @@ struct PacketQueue create_packet_queue(void) {
 }
 
 void destroy_packet_queue(struct PacketQueue * pktq) {
-    for (int i = 0; i < SDL_SemValue(pktq->capacity); i++) {
+    for (unsigned i = 0; i < SDL_SemValue(pktq->capacity); i++) {
         int idx = (i + pktq->front_idx) % PACKET_QUEUE_SIZE;
         av_packet_free(&pktq->data[idx]);
     }
@@ -234,16 +234,24 @@ int demuxing_thread(void * data) {
 
     while (!quit) {
         struct Message msg = msgq_receive(msgq_in);
+
+        while (msgq_peek(msgq_in).type != MSG_NONE)
+            msg = msgq_receive(msgq_in);
+
         switch (msg.type) {
             case MSG_NONE: break;
             case MSG_SEEK: {
                 seek_time = msg.needed_frame.timestamp;
 
-                if (avformat_seek_file(
+                int ret;
+                if ((ret = avformat_seek_file(
                     format_ctx, vstream_idx,
                     start_time , seek_time,
                     seek_time, 0
-                )) break;
+                ))) {
+                    fprintf(stderr, "Error Seeking Packet: %s\n", av_err2str(ret));
+                    break; /* break or continue??? */
+                }
 
 
                 pktq_drain(demuxed_vpktq, decoded_pktq);
@@ -258,7 +266,11 @@ int demuxing_thread(void * data) {
             int ret;
             if ((ret = av_read_frame(format_ctx, pkt))) {
                 /* the packet must be recycled into the queue if we aren't decoding it */
-                fprintf(stderr, "%s", av_err2str(ret));
+
+                /* maybe a problem here. when this errors (and stops queueing) decoding thread hangs and
+                 * may miss messages or prevent the program from closing. TODO: impliment timeout for 
+                 * dequeue_pkt(); */
+                fprintf(stderr, "Demuxing Error: %s\n", av_err2str(ret));
                 queue_pkt(decoded_pktq, pkt);
             } else if (pkt->stream_index == vstream_idx) {
                 queue_pkt(demuxed_vpktq, pkt);
@@ -278,7 +290,7 @@ int audio_thread(void * data) {
     threads_initialized += 1;
 
     uint8_t * audio_buf = NULL;
-    size_t audio_buf_len = 0;
+    int audio_buf_len = 0;
     
     AVFrame * frame = av_frame_alloc();
 
@@ -354,6 +366,8 @@ int audio_thread(void * data) {
 
 
 int video_thread(void * data) {
+
+#define MAX_DECODE_SEEK_FRAMES 100
     struct VideoInfo * info = data;
     AVCodecContext * codec_ctx = info->codec_ctx;
     struct MessageQueue * msgq_in = info->msgq_in;
@@ -373,26 +387,51 @@ int video_thread(void * data) {
         AVPacket * pkt;
         struct Message msg = msgq_receive(msgq_in);
 
+        while (msgq_peek(msgq_in).type != MSG_NONE)
+            msg = msgq_receive(msgq_in);
+
         switch (msg.type) {
             case MSG_NONE: usleep(10); break;
-            decode_frame: case MSG_SEEK: case MSG_GET_NEXT_FRAME:
-                pkt = dequeue_pkt(demuxed_pktq);
-                decode_frame(codec_ctx, pkt, frame);
-                queue_pkt(decoded_pktq, pkt);
+            case MSG_SEEK: case MSG_GET_NEXT_FRAME:
+                bool send = false;
+                for (int i = 0; i < MAX_DECODE_SEEK_FRAMES; i++) {
+                    pkt = dequeue_pkt(demuxed_pktq);
 
-                int64_t nts = msg.needed_frame.timestamp;
-                if (msg.type == MSG_SEEK) if ((nts < frame->pts) || (frame->pts + frame->duration < nts))
-                    goto decode_frame;
-
-                convert_frame(&frame_conv, frame, msg.needed_frame.pixels);
-
-                msgq_send(msgq_out, (struct Message){
-                    MSG_FRAME_READY, 
-                    .got_frame = { 
-                        .pts = frame->pts,
-                        .duration = frame->duration
+                    int ret;
+                    if ((ret = decode_frame(codec_ctx, pkt, frame))) {
+                        fprintf(stderr, "Decoding Error: %s\n", av_err2str(ret));
+                        break;
                     }
-                });
+                    queue_pkt(decoded_pktq, pkt);
+
+
+                    if (msg.type == MSG_GET_NEXT_FRAME) {
+                        send = true;
+                        break;
+                    }
+
+                    int64_t nts = msg.needed_frame.timestamp;
+
+                    if ((frame->pts + frame->duration >= nts) && (frame->pts <= nts)) {
+                        send = true;
+                        break;
+                    }
+                }
+
+                if (send) {
+                    convert_frame(&frame_conv, frame, msg.needed_frame.pixels);
+
+                    printf("SENT [msg.type: %lu, frame.pts: %ld]\n", msg.type, frame->pts);
+
+                    msgq_send(msgq_out, (struct Message) {
+                        msg.type == MSG_GET_NEXT_FRAME ? MSG_NEXT_FRAME_READY : MSG_SEEKED_FRAME_READY, 
+                        .got_frame = { 
+                            .pts = frame->pts,
+                            .duration = frame->duration
+                        }
+                    });
+                }
+
                 break;
         }
     }

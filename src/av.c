@@ -280,7 +280,6 @@ int main(int argc, char * argv[]) {
 
         struct timespec frame_start, frame_finish;
         double elapsed;
-        SDL_Texture * video_tex;
         clock_gettime(CLOCK_MONOTONIC, &frame_start);
         #define SECS(TIME_BASE) av_q2d(av_mul_q((AVRational) { (TIME_BASE), 1 }, pb_ctx->time_base))
         #define TIME_BASE(SECS) av_q2d(av_div_q( av_d2q(SECS, 0xffff), pb_ctx->time_base))
@@ -324,11 +323,15 @@ int main(int argc, char * argv[]) {
         }
 
         if (ts >= next_pts) {
-            video_tex = get_frame(pb_ctx, &pts, &dur);
-            next_pts = pts + dur;
-            draw_background(renderer, &colors);
-            SDL_RenderCopy(renderer, video_tex, NULL, &layout.viewer_rect);
-            advance_frame(pb_ctx);
+            SDL_Texture * video_tex;
+            if (get_frame(pb_ctx, &video_tex, &pts, &dur) || !paused) {
+                draw_background(renderer, &colors);
+                SDL_RenderCopy(renderer, video_tex, NULL, &layout.viewer_rect);
+            }
+            if (!paused) {
+                next_pts = pts + dur;
+                advance_frame(pb_ctx);
+            }
         }
 
         draw_progress(

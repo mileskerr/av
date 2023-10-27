@@ -5,7 +5,6 @@
 
 extern bool quit;
 
-
 struct FrameBuffer create_framebuffer(
     SDL_Renderer * renderer, SDL_PixelFormatEnum pixel_format,
     uint32_t width, uint32_t height
@@ -19,7 +18,6 @@ struct FrameBuffer create_framebuffer(
         renderer, pixel_format, SDL_TEXTUREACCESS_STREAMING,
         width, height
     );
-    ret.rendering = false;
 
     return ret;
 }
@@ -34,6 +32,7 @@ struct InternalData {
     AVFormatContext * format_ctx;
     AVCodecContext * vcodec_ctx, * acodec_ctx;
     int astream_idx, vstream_idx;
+    uint64_t expected_frame_response_type;
     struct PacketQueue demuxed_vpktq, demuxed_apktq, decoded_pktq;
     struct MessageQueue msgq_in, msgq_out_demux, msgq_out_vdec, msgq_out_adec;
     struct FrameBuffer framebuffer;
@@ -168,21 +167,16 @@ void playback_to_renderer(struct PlaybackCtx * pb_ctx, SDL_Renderer * renderer) 
 }
 
 
-static void finish_rendering(struct PlaybackCtx * pb_ctx) {
+int get_frame(struct PlaybackCtx * pb_ctx, SDL_Texture ** tex, int64_t * pts, int64_t * duration) {
     struct InternalData * id = pb_ctx->internal_data;
-    if (id->framebuffer.rendering) {
 
-        //TODO: fix this so it doesnt eat messages
-        struct Message msg;
-        
-        while (
-            !(
-                ((msg = msgq_receive(&id->msgq_in)).type == MSG_FRAME_READY) &&
-                (msgq_peek(&id->msgq_in).type != MSG_FRAME_READY)
-             )
-        ) usleep(10);
+    //TODO: fix this so it doesnt eat messages
+    struct Message msg = msgq_receive(&id->msgq_in);
 
-
+    int ret;
+    if ((ret = (msg.type == id->expected_frame_response_type))) {
+        printf("\nget frame called\n");
+        printf("RECIEVED [msg.type: %lu, frame.pts: %ld]\n", msg.type, msg.got_frame.pts);
         id->framebuffer.pts = msg.got_frame.pts;
         id->framebuffer.duration = msg.got_frame.duration;
 
@@ -191,23 +185,18 @@ static void finish_rendering(struct PlaybackCtx * pb_ctx) {
         SDL_Texture * tmp = id->framebuffer.frame;
         id->framebuffer.frame = id->framebuffer.next_frame;
         id->framebuffer.next_frame = tmp;        
+    } 
 
-        id->framebuffer.rendering = false;
-    }
-}
-
-
-SDL_Texture * get_frame(struct PlaybackCtx * pb_ctx, int64_t * pts, int64_t * duration) {
-
-    struct InternalData * id = pb_ctx->internal_data;
     if (pts) *pts = id->framebuffer.pts;
     if (duration) *duration = id->framebuffer.duration;
-    return id->framebuffer.frame;
+    if (tex) *tex = id->framebuffer.frame;
+
+    return ret;
 }
 
 void advance_frame(struct PlaybackCtx * pb_ctx) {
+    printf("\nadvance frame called\n");
     struct InternalData * id = pb_ctx->internal_data;
-    finish_rendering(pb_ctx);
 
     int pitch;
     uint8_t * pixels;
@@ -220,15 +209,12 @@ void advance_frame(struct PlaybackCtx * pb_ctx) {
             .needed_frame = {.pixels = pixels }
         }
     );
-    id->framebuffer.rendering = true;
+    id->expected_frame_response_type = MSG_NEXT_FRAME_READY;
 }
 
 void seek(struct PlaybackCtx * pb_ctx, int ts) {
+    printf("\nseek called\n");
     struct InternalData * id = pb_ctx->internal_data;
-    finish_rendering(pb_ctx);
-
-    while(msgq_receive(&id->msgq_in).type != MSG_NONE) 
-        usleep(10);
 
 
     int pitch;
@@ -248,7 +234,7 @@ void seek(struct PlaybackCtx * pb_ctx, int ts) {
             .needed_frame = { .timestamp = ts, .pixels = pixels } 
         }
     );
-    id->framebuffer.rendering = true;
+    id->expected_frame_response_type = MSG_SEEKED_FRAME_READY;
 }
 
 void destroy_playback_ctx(struct PlaybackCtx * pb_ctx) {

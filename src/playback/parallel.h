@@ -25,7 +25,8 @@ void pktq_fill(struct PacketQueue * pktq);
 
 enum MessageType {
     MSG_NONE,
-    MSG_FRAME_READY,
+    MSG_NEXT_FRAME_READY,
+    MSG_SEEKED_FRAME_READY,
     MSG_GET_NEXT_FRAME,
     MSG_SEEK,
 };
