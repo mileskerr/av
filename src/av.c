@@ -307,7 +307,6 @@ int main(int argc, char * argv[]) {
                 break;
             case EVENT_PREV_FRAME:
                 ts = pts;
-                printf("pts0: %ld\n", pts);
                 goto seek_to_ts;
 
             case EVENT_SEEK:
@@ -326,7 +325,6 @@ int main(int argc, char * argv[]) {
 
         if (ts >= next_pts) {
             video_tex = get_frame(pb_ctx, &pts, &dur);
-            printf("pts: %ld\n", pts);
             next_pts = pts + dur;
             draw_background(renderer, &colors);
             SDL_RenderCopy(renderer, video_tex, NULL, &layout.viewer_rect);

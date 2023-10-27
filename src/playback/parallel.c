@@ -383,7 +383,6 @@ int video_thread(void * data) {
                 int64_t nts = msg.needed_frame.timestamp;
                 if (msg.type == MSG_SEEK) if ((nts < frame->pts) || (frame->pts + frame->duration < nts))
                     goto decode_frame;
-                printf("nts: %ld, pts: %ld, pts+dur: %ld\n", nts, frame->pts, frame->pts + frame->duration);
 
                 convert_frame(&frame_conv, frame, msg.needed_frame.pixels);
 

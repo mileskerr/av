@@ -227,7 +227,6 @@ void seek(struct PlaybackCtx * pb_ctx, int ts) {
     struct InternalData * id = pb_ctx->internal_data;
     finish_rendering(pb_ctx);
 
-    printf("in: "); msgq_print(&id->msgq_in);
     while(msgq_receive(&id->msgq_in).type != MSG_NONE) 
         usleep(10);
 
@@ -249,7 +248,6 @@ void seek(struct PlaybackCtx * pb_ctx, int ts) {
             .needed_frame = { .timestamp = ts, .pixels = pixels } 
         }
     );
-    printf("out: "); msgq_print(&id->msgq_out_vdec);
     id->framebuffer.rendering = true;
 }
 
