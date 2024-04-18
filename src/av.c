@@ -232,6 +232,7 @@ int init_sdl(SDL_Renderer ** renderer, SDL_Window ** window) {
 
 
 int main(int argc, char * argv[]) {
+
     if (argc < 2) {
         fprintf(stderr, "provide filename\n\n");
         return -1;

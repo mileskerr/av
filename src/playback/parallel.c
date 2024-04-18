@@ -80,7 +80,8 @@ static int decode_frame(AVCodecContext * codec_ctx, AVPacket * pkt, AVFrame * fr
 
 struct MessageQueue create_message_queue(void) {
     return (struct MessageQueue) {
-        0, SDL_CreateMutex(),
+        SDL_CreateMutex(),
+        SDL_CreateSemaphore(0),
         NULL, NULL 
     };
 }
@@ -123,30 +124,65 @@ void msgq_send(struct MessageQueue * msgq, struct Message msg) {
         msgq->first = msgq->last = qd_msg;
     }
 
-    msgq->count++;
-
     SDL_UnlockMutex(msgq->mutex);    
+
+    SDL_SemPost(msgq->count);
+}
+
+struct Message msgq_wait_receive(struct MessageQueue * msgq) {
+    SDL_LockMutex(msgq->mutex);
+
+    SDL_SemWait(msgq->count);
+
+    struct QueuedMessage * got_msg = msgq->first;
+    struct Message ret = got_msg->msg;
+
+    if (msgq->last == msgq->first) {
+        msgq->last = msgq->first = NULL;
+    } else {
+        msgq->first = msgq->first->next;
+    }
+    free(got_msg);
+
+    SDL_UnlockMutex(msgq->mutex);
+
+    return ret;
+
 }
 
 struct Message msgq_receive(struct MessageQueue * msgq) {
-    struct Message ret = { MSG_NONE };
-    SDL_LockMutex(msgq->mutex);
+    if (SDL_SemValue(msgq->count))
+        return msgq_wait_receive(msgq);
+    else
+        return (struct Message) { MSG_NONE };
+}
 
-    if (msgq->count) {
-        struct QueuedMessage * got_msg = msgq->first;
-        ret = got_msg->msg;
-        if (msgq->last == msgq->first) {
-            msgq->last = msgq->first = NULL;
-        } else {
-            msgq->first = msgq->first->next;
-        }
-        free(got_msg);
-        msgq->count--;
-    }
-
-    SDL_UnlockMutex(msgq->mutex);
+struct ChNode create_channel(void) {
+    struct ChNode ret = {
+        .msgq_in = malloc(sizeof(struct MessageQueue)),
+        .msgq_out = malloc(sizeof(struct MessageQueue))
+    };
+    *ret.msgq_in = create_message_queue();
+    *ret.msgq_out = create_message_queue();
     return ret;
 }
+
+void destroy_channel(struct ChNode node) {
+    free(node.msgq_in);
+    free(node.msgq_out);
+}
+struct ChNode ch_remote_node(struct ChNode local_node) {
+    return (struct ChNode) {
+        .msgq_in = local_node.msgq_out,
+        .msgq_out = local_node.msgq_in
+    };
+}
+
+struct Message ch_receive(struct ChNode ch) { return msgq_receive(ch.msgq_in); }
+
+struct Message ch_wait_receive(struct ChNode ch) { return msgq_wait_receive(ch.msgq_in); }
+
+void ch_send(struct ChNode ch, struct Message msg) { msgq_send(ch.msgq_out, msg); }
 
 struct PacketQueue create_packet_queue(void) {
     return (struct PacketQueue) {
@@ -219,8 +255,7 @@ int demuxing_thread(void * data) {
     struct PacketQueue * decoded_pktq = info->decoded_pktq;
     struct PacketQueue * demuxed_vpktq = info->demuxed_vpktq;
     struct PacketQueue * demuxed_apktq = info->demuxed_apktq;
-    struct MessageQueue * msgq_in = info->msgq_in;
-    struct MessageQueue * msgq_out = info->msgq_out;
+    struct ChNode ch = info->ch;
     int vstream_idx = info->vstream_idx;
     int astream_idx = info->astream_idx;
 
@@ -233,10 +268,7 @@ int demuxing_thread(void * data) {
 
 
     while (!quit) {
-        struct Message msg = msgq_receive(msgq_in);
-
-        while (msgq_peek(msgq_in).type != MSG_NONE)
-            msg = msgq_receive(msgq_in);
+        struct Message msg = ch_receive(ch);
 
         switch (msg.type) {
             case MSG_NONE: break;
@@ -370,10 +402,9 @@ int video_thread(void * data) {
 #define MAX_DECODE_SEEK_FRAMES 100
     struct VideoInfo * info = data;
     AVCodecContext * codec_ctx = info->codec_ctx;
-    struct MessageQueue * msgq_in = info->msgq_in;
-    struct MessageQueue * msgq_out = info->msgq_out;
     struct PacketQueue * demuxed_pktq = info->demuxed_pktq;
     struct PacketQueue * decoded_pktq = info->decoded_pktq;
+    struct ChNode ch = info->ch;
 
     threads_initialized += 1;
 
@@ -385,10 +416,7 @@ int video_thread(void * data) {
 
     while (!quit) {
         AVPacket * pkt;
-        struct Message msg = msgq_receive(msgq_in);
-
-        while (msgq_peek(msgq_in).type != MSG_NONE)
-            msg = msgq_receive(msgq_in);
+        struct Message msg = ch_receive(ch);
 
         switch (msg.type) {
             case MSG_NONE: usleep(10); break;
@@ -421,9 +449,7 @@ int video_thread(void * data) {
                 if (send) {
                     convert_frame(&frame_conv, frame, msg.needed_frame.pixels);
 
-                    printf("SENT [msg.type: %lu, frame.pts: %ld]\n", msg.type, frame->pts);
-
-                    msgq_send(msgq_out, (struct Message) {
+                    ch_send(ch, (struct Message) {
                         msg.type == MSG_GET_NEXT_FRAME ? MSG_NEXT_FRAME_READY : MSG_SEEKED_FRAME_READY, 
                         .got_frame = { 
                             .pts = frame->pts,

@@ -32,17 +32,11 @@ enum MessageType {
 };
 
 struct MessageQueue {
-    int count;
     SDL_mutex * mutex;
+    SDL_semaphore * count;
     struct QueuedMessage * first;
     struct QueuedMessage * last;
 };
-
-struct MessageQueue create_message_queue(void);
-struct Message msgq_receive(struct MessageQueue * msgq);
-void msgq_send(struct MessageQueue * msgq, struct Message msg);
-struct Message msgq_peek(struct MessageQueue * msgq);
-void msgq_print(struct MessageQueue * msgq);
 
 struct Message {
     uint64_t type;
@@ -63,13 +57,34 @@ struct QueuedMessage {
     struct QueuedMessage * next;
 };
 
+struct MessageQueue create_message_queue(void);
+struct Message msgq_receive(struct MessageQueue * msgq);
+struct Message msgq_wait_receive(struct MessageQueue * msgq);
+void msgq_send(struct MessageQueue * msgq, struct Message msg);
+void msgq_print(struct MessageQueue * msgq);
+
+/* one side of a two-way communication channel.
+ * get the other side with ch_remote_node()
+ * it gets passed by value a lot cause its
+ * basically a pointer */
+struct ChNode {
+    struct MessageQueue * msgq_in;
+    struct MessageQueue * msgq_out;
+};
+
+struct ChNode create_channel(void);
+struct ChNode ch_remote_node(struct ChNode local_node);
+struct Message ch_receive(struct ChNode ch);
+struct Message ch_wait_receive(struct ChNode ch);
+void destroy_channel(struct ChNode node);
+void ch_send(struct ChNode ch, struct Message msg);
+
 struct DemuxInfo {
     AVFormatContext * format_ctx;
     struct PacketQueue * demuxed_vpktq;
     struct PacketQueue * demuxed_apktq;
     struct PacketQueue * decoded_pktq;
-    struct MessageQueue * msgq_in;
-    struct MessageQueue * msgq_out;
+    struct ChNode ch;
     int vstream_idx;
     int astream_idx;
 };
@@ -86,8 +101,7 @@ struct VideoInfo {
     AVCodecContext * codec_ctx;
     struct PacketQueue * demuxed_pktq;
     struct PacketQueue * decoded_pktq;
-    struct MessageQueue * msgq_in;
-    struct MessageQueue * msgq_out;
+    struct ChNode ch;
 };
 int video_thread(void *);
 

@@ -33,8 +33,8 @@ struct InternalData {
     AVCodecContext * vcodec_ctx, * acodec_ctx;
     int astream_idx, vstream_idx;
     uint64_t expected_frame_response_type;
+    struct ChNode ch_demux, ch_vdec;
     struct PacketQueue demuxed_vpktq, demuxed_apktq, decoded_pktq;
-    struct MessageQueue msgq_in, msgq_out_demux, msgq_out_vdec, msgq_out_adec;
     struct FrameBuffer framebuffer;
 };
 
@@ -132,9 +132,9 @@ void playback_to_renderer(struct PlaybackCtx * pb_ctx, SDL_Renderer * renderer) 
     id->demuxed_apktq = create_packet_queue();
     id->demuxed_vpktq = create_packet_queue();
     id->decoded_pktq = create_packet_queue();
-    id->msgq_out_demux = create_message_queue();
-    id->msgq_out_vdec = create_message_queue();
-    id->msgq_in = create_message_queue();
+
+    id->ch_demux = create_channel();
+    id->ch_vdec = create_channel();
 
     pktq_fill(&id->decoded_pktq);
 
@@ -146,8 +146,7 @@ void playback_to_renderer(struct PlaybackCtx * pb_ctx, SDL_Renderer * renderer) 
             &id->demuxed_vpktq,
             &id->demuxed_apktq,
             &id->decoded_pktq,
-            &id->msgq_out_demux,
-            &id->msgq_in,
+            ch_remote_node(id->ch_demux),
             id->vstream_idx,
             id->astream_idx
         }
@@ -158,8 +157,7 @@ void playback_to_renderer(struct PlaybackCtx * pb_ctx, SDL_Renderer * renderer) 
             id->vcodec_ctx,
             &id->demuxed_vpktq,
             &id->decoded_pktq,
-            &id->msgq_out_vdec,
-            &id->msgq_in,
+            ch_remote_node(id->ch_vdec)
         }
     );
     extern int threads_initialized;
@@ -171,12 +169,10 @@ int get_frame(struct PlaybackCtx * pb_ctx, SDL_Texture ** tex, int64_t * pts, in
     struct InternalData * id = pb_ctx->internal_data;
 
     //TODO: fix this so it doesnt eat messages
-    struct Message msg = msgq_receive(&id->msgq_in);
+    struct Message msg = ch_receive(id->ch_vdec);
 
     int ret;
     if ((ret = (msg.type == id->expected_frame_response_type))) {
-        printf("\nget frame called\n");
-        printf("RECIEVED [msg.type: %lu, frame.pts: %ld]\n", msg.type, msg.got_frame.pts);
         id->framebuffer.pts = msg.got_frame.pts;
         id->framebuffer.duration = msg.got_frame.duration;
 
@@ -195,15 +191,14 @@ int get_frame(struct PlaybackCtx * pb_ctx, SDL_Texture ** tex, int64_t * pts, in
 }
 
 void advance_frame(struct PlaybackCtx * pb_ctx) {
-    printf("\nadvance frame called\n");
     struct InternalData * id = pb_ctx->internal_data;
 
     int pitch;
     uint8_t * pixels;
     SDL_LockTexture(id->framebuffer.next_frame, NULL, (void **)&pixels, &pitch);
 
-    msgq_send(
-        &id->msgq_out_vdec, 
+    ch_send(
+        id->ch_vdec, 
         (struct Message) {
             MSG_GET_NEXT_FRAME, 
             .needed_frame = {.pixels = pixels }
@@ -213,22 +208,21 @@ void advance_frame(struct PlaybackCtx * pb_ctx) {
 }
 
 void seek(struct PlaybackCtx * pb_ctx, int ts) {
-    printf("\nseek called\n");
     struct InternalData * id = pb_ctx->internal_data;
 
 
     int pitch;
     uint8_t * pixels;
     SDL_LockTexture(id->framebuffer.next_frame, NULL, (void **)&pixels, &pitch);
-    msgq_send(
-        &id->msgq_out_demux, 
+    ch_send(
+        id->ch_demux, 
         (struct Message) {
             MSG_SEEK,
             .needed_frame = { .timestamp = ts } 
         }
     );
-    msgq_send(
-        &id->msgq_out_vdec, 
+    ch_send(
+        id->ch_vdec, 
         (struct Message) {
             MSG_SEEK,
             .needed_frame = { .timestamp = ts, .pixels = pixels } 
@@ -245,6 +239,9 @@ void destroy_playback_ctx(struct PlaybackCtx * pb_ctx) {
     destroy_packet_queue(&id->demuxed_apktq);
     destroy_packet_queue(&id->demuxed_vpktq);
     destroy_packet_queue(&id->decoded_pktq);
+
+    destroy_channel(id->ch_demux);
+    destroy_channel(id->ch_vdec);
 
     avformat_close_input(&id->format_ctx);
     avcodec_free_context(&id->vcodec_ctx);

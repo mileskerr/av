@@ -3,14 +3,18 @@
 
 /* buffer for storing frames as SDL_Texture:s 
  *
+ *
+ * <COMMENT COMMENT>
  * - video thread writes texture data to pixel_buf.    <-----------------+
  * - main thread swaps the textures, points pixel_buf to the data of     |
  *   next_frame and signals to video thread that it can begin decoding   |
      the next frame                                                      |
  * - main thread reads video data from current_frame as... --------------+
+ * <\COMMENT COMMENT>
+ *
  * 
  * mutex only guards next_frame, next_timestamp, and frame_needed. video thread 
- * should lock mutex the whole time it is decoding, and main thread should lock
+ * should lock mutex the whole time it is decoding, and manager thread should lock
  * it only while swapping the frames */
 struct FrameBuffer {
     SDL_Texture * frame, * next_frame;
