@@ -28,12 +28,12 @@ void destroy_framebuffer(struct FrameBuffer * fb) {
 }
 
 struct InternalData {
-    SDL_Thread * demuxer, * vdecoder, * adecoder;
+    SDL_Thread * demuxer, * vdecoder, * adecoder, * manager;
     AVFormatContext * format_ctx;
     AVCodecContext * vcodec_ctx, * acodec_ctx;
     int astream_idx, vstream_idx;
     uint64_t expected_frame_response_type;
-    struct ChNode ch_demux, ch_vdec;
+    struct ChNode ch_demux, ch_vdec, ch_man;
     struct PacketQueue demuxed_vpktq, demuxed_apktq, decoded_pktq;
     struct FrameBuffer framebuffer;
 };
@@ -133,11 +133,21 @@ void playback_to_renderer(struct PlaybackCtx * pb_ctx, SDL_Renderer * renderer) 
     id->demuxed_vpktq = create_packet_queue();
     id->decoded_pktq = create_packet_queue();
 
+    id->ch_man = create_channel();
     id->ch_demux = create_channel();
     id->ch_vdec = create_channel();
 
     pktq_fill(&id->decoded_pktq);
 
+
+    id->manager = SDL_CreateThread(
+        manager_thread, "Manager",
+        (void *) &(struct ManagerInfo) {
+            .ch = ch_remote_node(id->ch_man),
+            .ch_vdec = id->ch_vdec,
+            .ch_demux = id->ch_demux
+        }
+    );
 
     id->demuxer = SDL_CreateThread(
         demuxing_thread, "Demuxer", 
@@ -161,7 +171,7 @@ void playback_to_renderer(struct PlaybackCtx * pb_ctx, SDL_Renderer * renderer) 
         }
     );
     extern int threads_initialized;
-    while (threads_initialized < 2);
+    while (threads_initialized < 3);
 }
 
 
@@ -198,9 +208,9 @@ void advance_frame(struct PlaybackCtx * pb_ctx) {
     SDL_LockTexture(id->framebuffer.next_frame, NULL, (void **)&pixels, &pitch);
 
     ch_send(
-        id->ch_vdec, 
+        id->ch_man, 
         (struct Message) {
-            MSG_GET_NEXT_FRAME, 
+            MSG_ADVANCE_FRAME, 
             .needed_frame = {.pixels = pixels }
         }
     );
@@ -215,14 +225,7 @@ void seek(struct PlaybackCtx * pb_ctx, int ts) {
     uint8_t * pixels;
     SDL_LockTexture(id->framebuffer.next_frame, NULL, (void **)&pixels, &pitch);
     ch_send(
-        id->ch_demux, 
-        (struct Message) {
-            MSG_SEEK,
-            .needed_frame = { .timestamp = ts } 
-        }
-    );
-    ch_send(
-        id->ch_vdec, 
+        id->ch_man, 
         (struct Message) {
             MSG_SEEK,
             .needed_frame = { .timestamp = ts, .pixels = pixels } 

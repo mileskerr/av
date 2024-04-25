@@ -249,6 +249,26 @@ void pktq_fill(struct PacketQueue * pktq) {
 }
 
 
+int manager_thread(void * data) {
+    struct ManagerInfo in = *(struct ManagerInfo * )data;
+
+    threads_initialized += 1;
+
+    while (!quit) {
+        struct Message msg = ch_receive(in.ch);
+
+        switch (msg.type) {
+            case MSG_ADVANCE_FRAME:
+                ch_send(in.ch_vdec, msg);
+                break;
+            case MSG_SEEK:
+                ch_send(in.ch_vdec, msg);
+                ch_send(in.ch_demux, msg);
+        }
+    }
+}
+
+
 int demuxing_thread(void * data) {
     struct DemuxInfo * info = data;
     AVFormatContext * format_ctx = info->format_ctx;
@@ -420,7 +440,7 @@ int video_thread(void * data) {
 
         switch (msg.type) {
             case MSG_NONE: usleep(10); break;
-            case MSG_SEEK: case MSG_GET_NEXT_FRAME:
+            case MSG_SEEK: case MSG_ADVANCE_FRAME:
                 bool send = false;
                 for (int i = 0; i < MAX_DECODE_SEEK_FRAMES; i++) {
                     pkt = dequeue_pkt(demuxed_pktq);
@@ -433,7 +453,7 @@ int video_thread(void * data) {
                     queue_pkt(decoded_pktq, pkt);
 
 
-                    if (msg.type == MSG_GET_NEXT_FRAME) {
+                    if (msg.type == MSG_ADVANCE_FRAME) {
                         send = true;
                         break;
                     }
@@ -450,7 +470,7 @@ int video_thread(void * data) {
                     convert_frame(&frame_conv, frame, msg.needed_frame.pixels);
 
                     ch_send(ch, (struct Message) {
-                        msg.type == MSG_GET_NEXT_FRAME ? MSG_NEXT_FRAME_READY : MSG_SEEKED_FRAME_READY, 
+                        msg.type == MSG_ADVANCE_FRAME ? MSG_NEXT_FRAME_READY : MSG_SEEKED_FRAME_READY, 
                         .got_frame = { 
                             .pts = frame->pts,
                             .duration = frame->duration

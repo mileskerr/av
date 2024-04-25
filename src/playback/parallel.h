@@ -27,7 +27,7 @@ enum MessageType {
     MSG_NONE,
     MSG_NEXT_FRAME_READY,
     MSG_SEEKED_FRAME_READY,
-    MSG_GET_NEXT_FRAME,
+    MSG_ADVANCE_FRAME,
     MSG_SEEK,
 };
 
@@ -89,6 +89,13 @@ struct DemuxInfo {
     int astream_idx;
 };
 int demuxing_thread(void *);
+
+struct ManagerInfo {
+    struct ChNode ch;
+    struct ChNode ch_demux;
+    struct ChNode ch_vdec;
+};
+int manager_thread(void *);
 
 struct AudioInfo {
     AVCodecContext * codec_ctx;
