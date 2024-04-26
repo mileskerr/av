@@ -1,5 +1,4 @@
-#include "../av.h"
-#include "comms.h"
+#include "ipc.h"
 
 struct QueuedMessage {
     struct Message msg;

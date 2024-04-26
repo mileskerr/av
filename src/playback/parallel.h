@@ -1,6 +1,6 @@
 #pragma once
 #include "../av.h"
-#include "comms.h"
+#include "ipc.h"
 
 #define PACKET_QUEUE_SIZE 16
 

@@ -1,6 +1,4 @@
-#include "../av.h"
 #include "parallel.h"
-#include "comms.h"
 #include "utils.h"
 #include <SDL2/SDL_mutex.h>
 #include <SDL2/SDL_thread.h>

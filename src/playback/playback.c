@@ -1,6 +1,5 @@
 #include "playback.h"
 #include "parallel.h"
-#include "comms.h"
 #include <libavformat/avformat.h>
 #include <time.h>
 
