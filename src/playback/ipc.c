@@ -12,6 +12,11 @@ struct MessageQueue {
     struct QueuedMessage * last;
 };
 
+struct ChNode {
+    struct MessageQueue * msgq_in;
+    struct MessageQueue * msgq_out;
+};
+
 struct MessageQueue create_message_queue(void) {
     return (struct MessageQueue) {
         SDL_CreateMutex(),

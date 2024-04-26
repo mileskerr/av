@@ -24,7 +24,6 @@ struct Message {
     };
 };
 
-struct MessageQueue;
 
 /*
 struct MessageQueue create_message_queue(void);
@@ -39,10 +38,7 @@ void msgq_print(struct MessageQueue * msgq);
  * it gets passed by value a lot cause its
  * basically a pointer */
 
-struct ChNode {
-    struct MessageQueue * msgq_in;
-    struct MessageQueue * msgq_out;
-};
+struct ChNode;
 
 struct ChNode create_channel(void);
 struct ChNode ch_remote_node(struct ChNode local_node);
