@@ -2,13 +2,25 @@
 #include "../av.h"
 
 enum MessageType {
+    /* all */
     MSG_NONE,
+
+    /* main -> manage */
     MSG_ADVANCE_FRAME,
+
+    /* manage -> demux */
     MSG_DEMUX_PKT,
+
+    /* manage -> vdec, manage -> adec */
     MSG_DECODE_FRAME,
+
+    /* demux -> manage */
     MSG_VIDEO_PKT_READY,
-    MSG_VIDEO_FRAME_READY,
+    MSG_AUDIO_PKT_READY,
     MSG_NO_PKT_READY,
+    
+    /* vdec -> manage */
+    MSG_VIDEO_FRAME_READY,
     MSG_NO_VIDEO_FRAME_READY,
 };
 

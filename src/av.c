@@ -252,7 +252,6 @@ int main(int argc, char * argv[]) {
     struct ColorScheme colors = default_colors();
 
 
-
     struct Layout layout;
     {
         int w, h;
@@ -264,8 +263,6 @@ int main(int argc, char * argv[]) {
         );
     }
 
-
-    playback_to_renderer(pb_ctx, renderer);
 
     int64_t ts = pb_ctx->start_time;
     int64_t next_pts = ts;

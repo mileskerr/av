@@ -6,19 +6,21 @@
 #define SDL_AUDIO_FMT AUDIO_S16SYS
 #define SDL_AUDIO_SAMPLES 1024
 
-struct ManagerInfo {
+struct ManageInfo {
     struct ChNode ch;
     struct ChNode ch_demux;
     struct ChNode ch_vdec;
+    struct ChNode ch_adec;
     AVFrame ** current_frame_ptr;
     SDL_mutex * current_frame_mutex;
 };
-int manager_thread(void *);
+int thread_manage(void *);
 
-struct AudioInfo {
+struct ADecodeInfo {
+    struct ChNode ch;
     AVCodecContext * codec_ctx;
 };
-int audio_thread(void *);
+int thread_adec(void *);
 
 struct DemuxInfo {
     struct ChNode ch;
@@ -26,11 +28,11 @@ struct DemuxInfo {
     int vstream_idx;
     int astream_idx;
 };
-int demuxing_thread(void *);
+int thread_demux(void *);
 
-struct VideoInfo {
+struct VDecodeInfo {
     struct ChNode ch;
     AVCodecContext * codec_ctx;
 };
-int video_thread(void *);
+int thread_vdec(void *);
 
