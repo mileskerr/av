@@ -45,7 +45,7 @@ void advance_frame(struct PlaybackCtx * pb_ctx);
  * Either way, stores pointer to current frame in tex, frame's presentation timestamp
  * in pts and duration in duration, both in video stream units.
  * tex, pts, and duration can be NULL */
-int get_frame(struct PlaybackCtx * pb_ctx, SDL_Texture ** tex, int64_t * pts, int64_t * duration);
+int get_frame(struct PlaybackCtx * pb_ctx, SDL_Texture * tex, int64_t * pts, int64_t * duration);
 
 struct PlaybackCtx * open_for_playback(char * filename);
 

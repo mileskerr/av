@@ -1,9 +1,51 @@
 #include "playback.h"
 #include "parallel.h"
+#include "utils.h"
 #include <libavformat/avformat.h>
 #include <time.h>
 
 extern bool quit;
+
+/* data used to convert frames to a common format
+ * sws_context is not used for scaling, only format conversion.
+ * any scaling is done using SDL on the gpu */
+struct VFrameConverter {
+    struct SwsContext * sws_context;
+    int linesize;
+};
+
+static struct VFrameConverter make_frame_converter(
+    const AVCodecContext * const codec_ctx, const int format, const int linesize
+) {
+    return (struct VFrameConverter) {
+        sws_getContext(
+            codec_ctx->width, codec_ctx->height, codec_ctx->pix_fmt,
+            codec_ctx->width, codec_ctx->height, format,
+            SWS_POINT, NULL, NULL,
+            NULL
+        ),
+        linesize
+    };
+}
+
+static void destroy_frame_converter(struct VFrameConverter * frame_conv) {
+    sws_freeContext(frame_conv->sws_context);
+}
+
+static void convert_frame(
+    struct VFrameConverter * frame_conv, AVFrame * frame, uint8_t * pixels
+) {
+    //TODO: needs an array of linesizes to work with multi-plane images
+    sws_scale(
+        frame_conv->sws_context, 
+        (const uint8_t *const *) frame->data,
+        frame->linesize,
+        0,
+        frame->height,
+        &pixels, 
+        &frame_conv->linesize
+    );    
+}
 
 struct FrameBuffer create_framebuffer(
     SDL_Renderer * renderer, SDL_PixelFormatEnum pixel_format,
@@ -28,14 +70,14 @@ void destroy_framebuffer(struct FrameBuffer * fb) {
 }
 
 struct InternalData {
-    SDL_Thread * demuxer, * vdecoder, * adecoder, * manager;
     AVFormatContext * format_ctx;
     AVCodecContext * vcodec_ctx, * acodec_ctx;
+    AVFrame * current_frame;
+    SDL_mutex * current_frame_mutex;
+    SDL_Thread * demuxer, * vdecoder, * adecoder, * manager;
     int astream_idx, vstream_idx;
-    uint64_t expected_frame_response_type;
     struct ChNode ch_demux, ch_vdec, ch_man;
-    struct PacketQueue demuxed_vpktq, demuxed_apktq, decoded_pktq;
-    struct FrameBuffer framebuffer;
+    struct VFrameConverter frame_conv;
 };
 
 static AVCodecContext * open_codec_context(AVFormatContext * format_ctx, int stream_idx) {
@@ -111,7 +153,7 @@ struct PlaybackCtx * open_for_playback(char * filename) {
         .internal_data = malloc(sizeof(struct InternalData)),
     };
 
-    *(struct InternalData *)ret->internal_data = (struct InternalData){
+    *(struct InternalData *)ret->internal_data = (struct InternalData) {
         .format_ctx = format_ctx,
         .vcodec_ctx = vcodec_ctx,
         .acodec_ctx = acodec_ctx,
@@ -124,20 +166,13 @@ struct PlaybackCtx * open_for_playback(char * filename) {
 void playback_to_renderer(struct PlaybackCtx * pb_ctx, SDL_Renderer * renderer) {
     struct InternalData * id = pb_ctx->internal_data;
 
-    id->framebuffer = create_framebuffer(
-        renderer, SDL_PIXELFORMAT_RGB24, id->vcodec_ctx->width, id->vcodec_ctx->height
+    id->frame_conv = make_frame_converter(
+        id->vcodec_ctx, AV_PIX_FMT_RGB24, get_texture_pitch(SDL_PIXELFORMAT_RGB24, id->vcodec_ctx->width)
     );
-
-
-    id->demuxed_apktq = create_packet_queue();
-    id->demuxed_vpktq = create_packet_queue();
-    id->decoded_pktq = create_packet_queue();
 
     id->ch_man = create_channel();
     id->ch_demux = create_channel();
     id->ch_vdec = create_channel();
-
-    pktq_fill(&id->decoded_pktq);
 
 
     id->manager = SDL_CreateThread(
@@ -145,29 +180,26 @@ void playback_to_renderer(struct PlaybackCtx * pb_ctx, SDL_Renderer * renderer) 
         (void *) &(struct ManagerInfo) {
             .ch = ch_remote_node(id->ch_man),
             .ch_vdec = id->ch_vdec,
-            .ch_demux = id->ch_demux
+            .ch_demux = id->ch_demux,
+            .current_frame_ptr = &id->current_frame,
+            .current_frame_mutex = id->current_frame_mutex
         }
     );
 
     id->demuxer = SDL_CreateThread(
         demuxing_thread, "Demuxer", 
         (void *) &(struct DemuxInfo) {
-            id->format_ctx,
-            &id->demuxed_vpktq,
-            &id->demuxed_apktq,
-            &id->decoded_pktq,
-            ch_remote_node(id->ch_demux),
-            id->vstream_idx,
-            id->astream_idx
+            .ch = ch_remote_node(id->ch_demux),
+            .format_ctx = id->format_ctx,
+            .vstream_idx = id->vstream_idx,
+            .astream_idx = id->astream_idx
         }
     );
     id->vdecoder = SDL_CreateThread(
         video_thread, "Video Decoder", 
         (void *) &(struct VideoInfo) {
-            id->vcodec_ctx,
-            &id->demuxed_vpktq,
-            &id->decoded_pktq,
-            ch_remote_node(id->ch_vdec)
+            .ch = ch_remote_node(id->ch_vdec),
+            .codec_ctx = id->vcodec_ctx,
         }
     );
     extern int threads_initialized;
@@ -175,63 +207,40 @@ void playback_to_renderer(struct PlaybackCtx * pb_ctx, SDL_Renderer * renderer) 
 }
 
 
-int get_frame(struct PlaybackCtx * pb_ctx, SDL_Texture ** tex, int64_t * pts, int64_t * duration) {
+int get_frame(struct PlaybackCtx * pb_ctx, SDL_Texture * tex, int64_t * pts, int64_t * duration) {
     struct InternalData * id = pb_ctx->internal_data;
 
-    //TODO: fix this so it doesnt eat messages
-    struct Message msg = ch_receive(id->ch_vdec);
+    if (id->current_frame == NULL) return 1;
+    
+    int pitch;
+    uint8_t * pixels;
 
-    int ret;
-    if ((ret = (msg.type == id->expected_frame_response_type))) {
-        id->framebuffer.pts = msg.got_frame.pts;
-        id->framebuffer.duration = msg.got_frame.duration;
+    SDL_LockTexture(tex, NULL, (void **) &pixels, &pitch); 
+    SDL_LockMutex(id->current_frame_mutex);
 
-        SDL_UnlockTexture(id->framebuffer.next_frame);
+    *pts = id->current_frame->pts;
+    *duration = id->current_frame->duration;
 
-        SDL_Texture * tmp = id->framebuffer.frame;
-        id->framebuffer.frame = id->framebuffer.next_frame;
-        id->framebuffer.next_frame = tmp;        
-    } 
+    convert_frame(&id->frame_conv, id->current_frame, pixels);
 
-    if (pts) *pts = id->framebuffer.pts;
-    if (duration) *duration = id->framebuffer.duration;
-    if (tex) *tex = id->framebuffer.frame;
+    SDL_UnlockTexture(tex);
 
-    return ret;
+    SDL_UnlockMutex(id->current_frame_mutex);
+
+    return 0;
 }
 
 void advance_frame(struct PlaybackCtx * pb_ctx) {
     struct InternalData * id = pb_ctx->internal_data;
 
-    int pitch;
-    uint8_t * pixels;
-    SDL_LockTexture(id->framebuffer.next_frame, NULL, (void **)&pixels, &pitch);
-
     ch_send(
         id->ch_man, 
-        (struct Message) {
-            MSG_ADVANCE_FRAME, 
-            .needed_frame = {.pixels = pixels }
-        }
+        (struct Message) { .type = MSG_ADVANCE_FRAME }
     );
-    id->expected_frame_response_type = MSG_NEXT_FRAME_READY;
 }
 
 void seek(struct PlaybackCtx * pb_ctx, int ts) {
-    struct InternalData * id = pb_ctx->internal_data;
-
-
-    int pitch;
-    uint8_t * pixels;
-    SDL_LockTexture(id->framebuffer.next_frame, NULL, (void **)&pixels, &pitch);
-    ch_send(
-        id->ch_man, 
-        (struct Message) {
-            MSG_SEEK,
-            .needed_frame = { .timestamp = ts, .pixels = pixels } 
-        }
-    );
-    id->expected_frame_response_type = MSG_SEEKED_FRAME_READY;
+    //struct InternalData * id = pb_ctx->internal_data;
 }
 
 void destroy_playback_ctx(struct PlaybackCtx * pb_ctx) {
@@ -239,9 +248,7 @@ void destroy_playback_ctx(struct PlaybackCtx * pb_ctx) {
     SDL_WaitThread(id->vdecoder, NULL);
     SDL_WaitThread(id->demuxer, NULL);
 
-    destroy_packet_queue(&id->demuxed_apktq);
-    destroy_packet_queue(&id->demuxed_vpktq);
-    destroy_packet_queue(&id->decoded_pktq);
+    destroy_frame_converter(&id->frame_conv);
 
     destroy_channel(id->ch_demux);
     destroy_channel(id->ch_vdec);

@@ -10,70 +10,42 @@ extern bool quit;
 
 int threads_initialized = 0;
 
+#define PACKET_QUEUE_SIZE 16
+#define FRAME_QUEUE_SIZE 16
 
-/* data used to convert frames to a common format
- * sws_context is not used for scaling, only format conversion.
- * any scaling is done using SDL on the gpu */
-struct VFrameConverter {
-    struct SwsContext * sws_context;
-    int linesize;
+struct PacketQueue {
+    AVPacket * data[PACKET_QUEUE_SIZE];
+    SDL_semaphore * capacity;
+    SDL_mutex * mutex;
+    int front_idx;
 };
 
-static struct VFrameConverter make_frame_converter(
-    const AVCodecContext * const codec_ctx, const int format, const int linesize
-) {
-    return (struct VFrameConverter) {
-        sws_getContext(
-            codec_ctx->width, codec_ctx->height, codec_ctx->pix_fmt,
-            codec_ctx->width, codec_ctx->height, format,
-            SWS_POINT, NULL, NULL,
-            NULL
-        ),
-        linesize
-    };
-}
+struct FrameQueue {
+    AVFrame * data[FRAME_QUEUE_SIZE];
+    int capacity;
+    int front_idx;
+};
 
-static void destroy_frame_converter(struct VFrameConverter * frame_conv) {
-    sws_freeContext(frame_conv->sws_context);
-}
+struct FrameQueue create_frame_queue(void) { return (struct FrameQueue) {0}; }
 
-static void convert_frame(
-    struct VFrameConverter * frame_conv, AVFrame * frame, uint8_t * pixels
-) {
-    //TODO: needs an array of linesizes to work with multi-plane images
-    sws_scale(
-        frame_conv->sws_context, 
-        (const uint8_t *const *) frame->data,
-        frame->linesize,
-        0,
-        frame->height,
-        &pixels, 
-        &frame_conv->linesize
-    );    
-}
-
-
-/* decode a single frame from pkt.
- * returns 0 on success, AVERROR_EOF on end of file, nonzero error code on decode error. */
-static int decode_frame(AVCodecContext * codec_ctx, AVPacket * pkt, AVFrame * frame_out) {
-    int ret;
-    send_packet:
-    switch (ret = avcodec_send_packet(codec_ctx, pkt)) {
-        case 0:
-            break;
-        default:
-            return ret;
+static void destroy_frame_queue( struct FrameQueue * frameq) {
+    for (int i = 0; i < frameq->capacity; i++) {
+        int idx = (i + frameq->front_idx) % FRAME_QUEUE_SIZE;
+        av_frame_free(&frameq->data[idx]);
     }
-    //return avcodec_receive_frame(codec_ctx, frame_out);
-    switch (ret = avcodec_receive_frame(codec_ctx, frame_out)) {
-        case AVERROR(EAGAIN):
-            goto send_packet;
-        case 0:
-            break;
-        default:
-            return ret;
-    }
-    return 0;
+}
+
+static void queue_frame(struct FrameQueue * frameq, AVFrame * frame) {
+    int back = (frameq->front_idx + frameq->capacity) % PACKET_QUEUE_SIZE;
+    frameq->data[back] = frame;
+    frameq->capacity++;
+}
+
+static AVFrame * dequeue_frame(struct FrameQueue * frameq) {
+    if (!frameq->capacity) return NULL;
+    frameq->capacity--;
+    frameq->front_idx = (frameq->front_idx + 1) % FRAME_QUEUE_SIZE;
+    return frameq->data[frameq->front_idx];
 }
 
 struct PacketQueue create_packet_queue(void) {
@@ -83,7 +55,7 @@ struct PacketQueue create_packet_queue(void) {
     };
 }
 
-void destroy_packet_queue(struct PacketQueue * pktq) {
+static void destroy_packet_queue(struct PacketQueue * pktq) {
     for (unsigned i = 0; i < SDL_SemValue(pktq->capacity); i++) {
         int idx = (i + pktq->front_idx) % PACKET_QUEUE_SIZE;
         av_packet_free(&pktq->data[idx]);
@@ -112,32 +84,29 @@ static AVPacket * dequeue_pkt(struct PacketQueue * pktq) {
     return ret;
 }
 
-static void pktq_drain(struct PacketQueue * src, struct PacketQueue * dst) {
-    SDL_LockMutex(src->mutex);
-    SDL_LockMutex(dst->mutex);
+static int pktq_cap(struct PacketQueue * pktq) { return SDL_SemValue(pktq->capacity); }
 
-
-    int dst_back = (dst->front_idx + SDL_SemValue(dst->capacity)) % PACKET_QUEUE_SIZE;
-    int src_front = src->front_idx;
-
-    int iters = SDL_SemValue(src->capacity);
-    for (int i = 0; i < iters; i++) {
-        int src_idx = (src_front + i) % PACKET_QUEUE_SIZE;
-        int dst_idx = (dst_back + i) % PACKET_QUEUE_SIZE;
-        dst->data[dst_idx] = src->data[src_idx];
-        SDL_SemPost(dst->capacity);
-        SDL_SemWait(src->capacity);
+/* decode a single frame from pkt.
+ * returns 0 on success, AVERROR_EOF on end of file, nonzero error code on decode error. */
+static int decode_frame(AVCodecContext * codec_ctx, AVPacket * pkt, AVFrame * frame_out) {
+    int ret;
+    send_packet:
+    switch (ret = avcodec_send_packet(codec_ctx, pkt)) {
+        case 0:
+            break;
+        default:
+            return ret;
     }
-
-
-    SDL_UnlockMutex(src->mutex);
-    SDL_UnlockMutex(dst->mutex);
-}
-
-void pktq_fill(struct PacketQueue * pktq) {
-    for (int i = 0; i < PACKET_QUEUE_SIZE; i++) {
-        queue_pkt(pktq, av_packet_alloc());
+    //return avcodec_receive_frame(codec_ctx, frame_out);
+    switch (ret = avcodec_receive_frame(codec_ctx, frame_out)) {
+        case AVERROR(EAGAIN):
+            goto send_packet;
+        case 0:
+            break;
+        default:
+            return ret;
     }
+    return 0;
 }
 
 
@@ -146,90 +115,162 @@ int manager_thread(void * data) {
 
     threads_initialized += 1;
 
+    #define PREFETCH_FRAMES 3
+
+
+    struct PacketQueue pktq = create_packet_queue();
+    struct FrameQueue frameq = create_frame_queue();
+
+    int packets_requested, frames_requested;
+    packets_requested = frames_requested = 0;
+
     while (!quit) {
-        struct Message msg = ch_receive(in.ch);
+        /* for seeking, make a state machine */
+    
+        while (
+            (packets_requested + pktq_cap(&pktq)) < PREFETCH_FRAMES
+        ) {
+            ch_send(in.ch_demux,
+                (struct Message) {
+                    .type = MSG_DEMUX_PKT
+                }
+            );
+            packets_requested++;
+        }
+
+        while (
+            ((frames_requested + frameq.capacity) < PREFETCH_FRAMES) && pktq_cap(&pktq)
+        ) {
+            ch_send(in.ch_vdec, 
+                (struct Message) {
+                    .type = MSG_DECODE_FRAME,
+                    .pkt = dequeue_pkt(&pktq)
+                }
+            );
+            frames_requested++;
+        }
+        
+        struct Message msg;
+ 
+        msg = ch_receive(in.ch_demux);
+
+        switch (msg.type) {
+            case MSG_VIDEO_PKT_READY:
+                queue_pkt(&pktq, msg.pkt);
+            case MSG_NO_PKT_READY:
+                packets_requested--;
+                break;
+        }
+
+        msg = ch_receive(in.ch_vdec);
+
+        switch (msg.type) {
+            case MSG_VIDEO_FRAME_READY:
+                queue_frame(&frameq, msg.frame);
+            case MSG_NO_VIDEO_FRAME_READY:
+                frames_requested--;
+                break;
+        }
+
+        msg = ch_receive(in.ch);
 
         switch (msg.type) {
             case MSG_ADVANCE_FRAME:
-                ch_send(in.ch_vdec, msg);
+                SDL_LockMutex(in.current_frame_mutex);
+
+                if (frameq.capacity) {
+                    //if (frameq.data[frameq.front_idx] != *in.current_frame_ptr) {
+                    if (*in.current_frame_ptr)
+                        av_frame_free(in.current_frame_ptr);
+                    //}
+                    *in.current_frame_ptr = dequeue_frame(&frameq);
+                }
+
+                SDL_UnlockMutex(in.current_frame_mutex);
                 break;
-            case MSG_SEEK:
-                ch_send(in.ch_vdec, msg);
-                ch_send(in.ch_demux, msg);
         }
+
+        usleep(10);
     }
+    return 0;
 }
 
 
 int demuxing_thread(void * data) {
-    struct DemuxInfo * info = data;
-    AVFormatContext * format_ctx = info->format_ctx;
-    struct PacketQueue * decoded_pktq = info->decoded_pktq;
-    struct PacketQueue * demuxed_vpktq = info->demuxed_vpktq;
-    struct PacketQueue * demuxed_apktq = info->demuxed_apktq;
-    struct ChNode ch = info->ch;
-    int vstream_idx = info->vstream_idx;
-    int astream_idx = info->astream_idx;
-
-    threads_initialized += 1;
-
-    uint32_t * msg;
-
-    int start_time = format_ctx->streams[vstream_idx]->start_time;
-    int seek_time = start_time - 1;
-
+    struct DemuxInfo in = *(struct DemuxInfo *) data;
+    
+    threads_initialized++;
 
     while (!quit) {
-        struct Message msg = ch_receive(ch);
+        struct Message msg = ch_receive(in.ch);
 
         switch (msg.type) {
-            case MSG_NONE: break;
-            case MSG_SEEK: {
-                seek_time = msg.needed_frame.timestamp;
-
+            case MSG_DEMUX_PKT:
+                AVPacket * pkt = av_packet_alloc();
                 int ret;
-                if ((ret = avformat_seek_file(
-                    format_ctx, vstream_idx,
-                    start_time , seek_time,
-                    seek_time, 0
-                ))) {
-                    fprintf(stderr, "Error Seeking Packet: %s\n", av_err2str(ret));
-                    break; /* break or continue??? */
+                if ((ret = av_read_frame(in.format_ctx, pkt))) {
+                    fprintf(stderr, "Demuxing Error: %s\n", av_err2str(ret));
+                    goto no_packet;
                 }
-
-
-                pktq_drain(demuxed_vpktq, decoded_pktq);
-            }
-        }
-        
-        AVPacket * pkt = dequeue_pkt(decoded_pktq);
-
-        if (pkt) {
-            av_packet_unref(pkt);
-
-            int ret;
-            if ((ret = av_read_frame(format_ctx, pkt))) {
-                /* the packet must be recycled into the queue if we aren't decoding it */
-
-                /* maybe a problem here. when this errors (and stops queueing) decoding thread hangs and
-                 * may miss messages or prevent the program from closing. TODO: impliment timeout for 
-                 * dequeue_pkt(); */
-                fprintf(stderr, "Demuxing Error: %s\n", av_err2str(ret));
-                queue_pkt(decoded_pktq, pkt);
-            } else if (pkt->stream_index == vstream_idx) {
-                queue_pkt(demuxed_vpktq, pkt);
-            } else
-                queue_pkt(decoded_pktq, pkt);
+                if (pkt->stream_index == in.vstream_idx) {
+                    ch_send(
+                        in.ch,
+                        (struct Message) {
+                            .type = MSG_VIDEO_PKT_READY,
+                            .pkt = pkt
+                        }
+                    );
+                    break;
+                }
+                no_packet:
+                ch_send(
+                    in.ch,
+                    (struct Message) { .type = MSG_NO_PKT_READY }
+                );
+                break;
         }
     }
     return 0;
 }
 
+#define MAX_DECODE_SEEK_FRAMES 100
+
+int video_thread(void * data) {
+    struct VideoInfo in = *(struct VideoInfo *) data;
+
+    threads_initialized++;
+
+    while (!quit) {
+        struct Message msg = ch_receive(in.ch);
+
+        switch (msg.type) {
+            case MSG_DECODE_FRAME:
+                AVFrame * frame = av_frame_alloc();
+                int ret;
+                if ((ret = decode_frame(in.codec_ctx, msg.pkt, frame))) {
+                    fprintf(stderr, "Decoding Error: %s\n", av_err2str(ret));
+                    goto no_frame;
+                }
+                ch_send(in.ch,
+                    (struct Message) {
+                        MSG_VIDEO_FRAME_READY,
+                        .frame = frame
+                    }
+                );
+                break;
+                no_frame:
+                ch_send(in.ch,
+                    (struct Message) { .type = MSG_NO_VIDEO_FRAME_READY }
+                );
+                break;
+        }
+    }
+    return 0;
+}
+/*
 int audio_thread(void * data) {
     struct AudioInfo * info = data;
     AVCodecContext * codec_ctx = info->codec_ctx;
-    struct PacketQueue * demuxed_pktq = info->demuxed_pktq;
-    struct PacketQueue * decoded_pktq = info->decoded_pktq;
 
     threads_initialized += 1;
 
@@ -290,8 +331,8 @@ int audio_thread(void * data) {
             1
         );
         if (len > audio_buf_len) { 
-            /* this should work fine assuming most packets are
-             * about the same size, which is potentially true */
+             * this should work fine assuming most packets are
+             * about the same size, which is potentially true
             if (audio_buf) free(audio_buf);
             audio_buf = malloc(len);
             audio_buf_len = len;
@@ -307,71 +348,4 @@ int audio_thread(void * data) {
     }
     return 0;
 }
-
-
-int video_thread(void * data) {
-
-#define MAX_DECODE_SEEK_FRAMES 100
-    struct VideoInfo * info = data;
-    AVCodecContext * codec_ctx = info->codec_ctx;
-    struct PacketQueue * demuxed_pktq = info->demuxed_pktq;
-    struct PacketQueue * decoded_pktq = info->decoded_pktq;
-    struct ChNode ch = info->ch;
-
-    threads_initialized += 1;
-
-    AVFrame * frame = av_frame_alloc();
-
-    struct VFrameConverter frame_conv = make_frame_converter(
-        codec_ctx, AV_PIX_FMT_RGB24, get_texture_pitch(SDL_PIXELFORMAT_RGB24, codec_ctx->width)
-    );
-
-    while (!quit) {
-        AVPacket * pkt;
-        struct Message msg = ch_receive(ch);
-
-        switch (msg.type) {
-            case MSG_NONE: usleep(10); break;
-            case MSG_SEEK: case MSG_ADVANCE_FRAME:
-                bool send = false;
-                for (int i = 0; i < MAX_DECODE_SEEK_FRAMES; i++) {
-                    pkt = dequeue_pkt(demuxed_pktq);
-
-                    int ret;
-                    if ((ret = decode_frame(codec_ctx, pkt, frame))) {
-                        fprintf(stderr, "Decoding Error: %s\n", av_err2str(ret));
-                        break;
-                    }
-                    queue_pkt(decoded_pktq, pkt);
-
-
-                    if (msg.type == MSG_ADVANCE_FRAME) {
-                        send = true;
-                        break;
-                    }
-
-                    int64_t nts = msg.needed_frame.timestamp;
-
-                    if ((frame->pts + frame->duration >= nts) && (frame->pts <= nts)) {
-                        send = true;
-                        break;
-                    }
-                }
-
-                if (send) {
-                    convert_frame(&frame_conv, frame, msg.needed_frame.pixels);
-
-                    ch_send(ch, (struct Message) {
-                        msg.type == MSG_ADVANCE_FRAME ? MSG_NEXT_FRAME_READY : MSG_SEEKED_FRAME_READY, 
-                        .got_frame = { 
-                            .pts = frame->pts,
-                            .duration = frame->duration
-                        }
-                    });
-                }
-
-                break;
-        }
-    }
-    return 0;
-}
+*/

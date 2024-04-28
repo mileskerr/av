@@ -276,6 +276,12 @@ int main(int argc, char * argv[]) {
 
     struct EventQueue eventq = create_event_queue();
     
+    SDL_Texture * video_tex = SDL_CreateTexture(
+        renderer, SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STREAMING,
+        pb_ctx->width, pb_ctx->height
+    );
+
+    advance_frame(pb_ctx);
 
     while (!quit) {
 
@@ -324,8 +330,7 @@ int main(int argc, char * argv[]) {
         }
 
         if (ts >= next_pts) {
-            SDL_Texture * video_tex;
-            if (get_frame(pb_ctx, &video_tex, &pts, &dur) || !paused) {
+            if (get_frame(pb_ctx, video_tex, &pts, &dur) || !paused) {
                 draw_background(renderer, &colors);
                 SDL_RenderCopy(renderer, video_tex, NULL, &layout.viewer_rect);
             }
